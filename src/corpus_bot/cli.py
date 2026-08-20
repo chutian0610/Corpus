@@ -19,9 +19,13 @@ from . import __version__
 from .errors import CorpusBotError
 from .ids import source_id_from_content
 from .storage import (
+    add_source_to_concept,
     certification_stats,
     commit_source,
+    dry_run_delete_source,
+    export_index,
     find_concept_by_link,
+    get_concept_evidence,
     init_db,
     is_initialized,
     list_concepts,
@@ -30,7 +34,9 @@ from .storage import (
     mark_certified,
     read_concept,
     read_source,
+    remove_source_from_concept,
     search_concepts,
+    soft_delete_source,
     stage_source,
     unmark_certified,
     update_concept,
@@ -358,10 +364,73 @@ def sources_commit(vault_path: Path, source_id: str, as_json: bool) -> None:
     _emit(result, as_json=as_json)
 
 
+@sources.command(name="delete")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.argument("source_id")
+@click.option("--yes", is_flag=True, help="跳过 dry-run 检查，直接删除")
+@click.option("--dry-run/--no-dry-run", default=True, help="默认先 dry-run")
+@click.option("--reason", default=None, help="删除原因")
+@click.option("--json", "as_json", is_flag=True)
+def sources_delete(vault_path: Path, source_id: str, yes: bool, dry_run: bool, reason: str | None, as_json: bool) -> None:
+    """软删除 source（status=deleted）。不级联删 concept。
+
+    默认先 dry-run 看 impact；--yes 跳过 dry-run 直接执行。
+    """
+    paths = _resolve_db(vault_path)
+    # 显示 dry-run preview（除非已经 --yes 强制执行）
+    if not yes:
+        try:
+            preview = dry_run_delete_source(paths["corpus_db"], source_id)
+        except Exception as e:
+            _err(str(e))
+        if as_json:
+            click.echo(json.dumps(preview, indent=2, ensure_ascii=False))
+        else:
+            click.echo("=== DRY RUN: source delete impact ===")
+            click.echo(f"  source_id: {source_id}")
+            click.echo(f"  current_status: {preview['current_status']}")
+            click.echo(f"  affected_concepts: {preview['affected_concepts_count']}")
+            if preview["would_become_orphans"]:
+                click.echo(f"  will orphan: {preview['would_become_orphans']}")
+            for c in preview["still_supported"]:
+                click.echo(f"  still supported (other sources): {c}")
+            click.echo("")
+            click.echo(f"  recommendation: {preview['recommendation']}")
+            click.echo("")
+            click.echo("  pass --yes to actually delete")
+        if dry_run:
+            return  # 默认 dry-run 模式下永远不执行删除
+    try:
+        result = soft_delete_source(paths["corpus_db"], source_id, deleted_reason=reason)
+    except Exception as e:
+        _err(str(e), hint=getattr(e, "hint", None))
+    _emit(result, as_json=as_json)
+
+
 # ---------- concepts ----------
 
 # 顶层 stats alias（agent 常用）
 cli.add_command(vault_stats, name="stats")
+
+# 顶层 index sync（导出 wiki/index/*.json）
+@cli.command(name="index")
+@click.argument("subcmd", type=click.Choice(["sync"]))
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.option("--json", "as_json", is_flag=True)
+def cli_index(subcmd: str, vault_path: Path, as_json: bool) -> None:
+    """维护 wiki/index/ 全局索引。
+
+    corpus-bot index sync <vault> → 重建 wiki/index/concepts.json + sources.json
+    """
+    if subcmd != "sync":
+        _err(f"unknown subcmd: {subcmd}")
+    paths = _resolve_db(vault_path)
+    try:
+        result = export_index(paths["corpus_db"], paths["wiki_index"])
+    except Exception as e:
+        _err(str(e))
+    _emit(result, as_json=as_json)
+
 
 @cli.group()
 def concepts() -> None:
@@ -373,31 +442,45 @@ def concepts() -> None:
 @click.option("--slug", required=True, help="filesystem-safe slug")
 @click.option("--title", required=True)
 @click.option("--body", required=True, help="wiki body (markdown)")
-@click.option("--source-ids", "source_ids", default="", help="逗号分隔的 source_id 列表")
+@click.option("--extractions", "extractions_json", required=True,
+              help='JSON array: [{"source_id":"abc","quote_span":"..."}, ...]')
+@click.option("--prompt-version", default=None)
 @click.option("--links", "links", default="", help="逗号分隔的 wikilink slug 列表")
 @click.option("--json", "as_json", is_flag=True)
 def concepts_write(
-    vault_path: Path, slug: str, title: str, body: str, source_ids: str, links: str, as_json: bool
+    vault_path: Path, slug: str, title: str, body: str,
+    extractions_json: str, prompt_version: str | None,
+    links: str, as_json: bool,
 ) -> None:
     """写一篇 wiki concept。slug 已存在 → ConflictError。
 
-    调用方（agent）自己用 LLM 生成 title / body / links。
+    必须传 --extractions：每个 source 一段 quote_span 原文证据。
     """
     paths = _resolve_db(vault_path)
-    sid_list = [s.strip() for s in source_ids.split(",") if s.strip()]
+    try:
+        extractions_data = json.loads(extractions_json)
+    except json.JSONDecodeError as e:
+        _err(f"--extractions 不是合法 JSON: {e}")
+    if not isinstance(extractions_data, list):
+        _err("--extractions 必须是 JSON array")
+
     link_list = [s.strip() for s in links.split(",") if s.strip()]
 
     try:
         result = write_concept(
             paths["corpus_db"],
             slug=slug, title=title, body=body,
-            source_ids=sid_list, links=link_list,
+            extractions_data=extractions_data,
+            links=link_list,
+            prompt_version=prompt_version,
         )
         # 物理写文件
         wiki_path = paths["wiki_concept"] / f"{slug}.md"
         frontmatter = f"---\nslug: {slug}\ntitle: {title}\n---\n\n"
         wiki_path.write_text(frontmatter + body, encoding="utf-8")
         result["wiki_path"] = str(wiki_path)
+        # 自动 export index
+        export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
@@ -492,6 +575,62 @@ def concepts_unmark(vault_path: Path, slug: str, as_json: bool) -> None:
     paths = _resolve_db(vault_path)
     try:
         result = unmark_certified(paths["corpus_db"], slug)
+    except Exception as e:
+        _err(str(e))
+    _emit(result, as_json=as_json)
+
+
+@concepts.command(name="evidence")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.argument("slug")
+@click.option("--source-id", default=None, help="只看这个 source 的证据")
+@click.option("--json", "as_json", is_flag=True)
+def concepts_evidence(vault_path: Path, slug: str, source_id: str | None, as_json: bool) -> None:
+    """查 concept 的抽取证据（quote_span + agent + prompt + time）。"""
+    paths = _resolve_db(vault_path)
+    if source_id:
+        evidence = get_concept_evidence(paths["corpus_db"], slug, source_id)
+        if evidence is None:
+            _err(f"no extraction found for {slug} from {source_id}")
+        _emit(evidence, as_json=as_json)
+    else:
+        from .storage import get_concept_evidence_summary
+        summary = get_concept_evidence_summary(paths["corpus_db"], slug)
+        _emit(summary, as_json=as_json)
+
+
+@concepts.command(name="add-source")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.argument("slug")
+@click.option("--source-id", required=True)
+@click.option("--quote-span", required=True)
+@click.option("--prompt-version", default=None)
+@click.option("--json", "as_json", is_flag=True)
+def concepts_add_source(vault_path: Path, slug: str, source_id: str, quote_span: str, prompt_version: str | None, as_json: bool) -> None:
+    """给 concept 加一个 source（自动写 extractions + 清 is_orphan）。"""
+    paths = _resolve_db(vault_path)
+    try:
+        result = add_source_to_concept(
+            paths["corpus_db"], slug, source_id,
+            quote_span=quote_span, prompt_version=prompt_version,
+        )
+        export_index(paths["corpus_db"], paths["wiki_index"])
+    except Exception as e:
+        _err(str(e), hint=getattr(e, "hint", None))
+    _emit(result, as_json=as_json)
+
+
+@concepts.command(name="remove-source")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.argument("slug")
+@click.option("--source-id", required=True)
+@click.option("--json", "as_json", is_flag=True)
+def concepts_remove_source(vault_path: Path, slug: str, source_id: str, as_json: bool) -> None:
+    """从 concept.source_ids 移除一个 source（自动更新 is_orphan）。"""
+    paths = _resolve_db(vault_path)
+    try:
+        result = remove_source_from_concept(paths["corpus_db"], slug, source_id)
+        export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
         _err(str(e))
     _emit(result, as_json=as_json)

@@ -46,12 +46,13 @@ corpus-bot sources list ~/my-wiki --status staged
 # 5. Agent 自己用 LLM 抽 concepts（OpenAI/Anthropic）
 # （用你自己的 API key，不在 corpus-bot 里）
 
-# 6. 写 concept
+# 6. 写 concept（**必传 --extractions**：每个 source 一段 quote_span 原文证据）
 corpus-bot concepts write ~/my-wiki \
     --slug postgres-mvcc \
     --title "PostgreSQL MVCC" \
     --body "..." \
-    --source-ids d607... \
+    --extractions '[{"source_id":"d607...","quote_span":"Each row carries xmin/xmax..."}]' \
+    --prompt-version extract-v1 \
     --links postgres-transactions,wal
 
 # 7. 标记源完成
@@ -95,7 +96,8 @@ corpus-bot stats ~/my-wiki
    - concepts show ... 不需要，直接读 vault/raw/<source_id>.md
    - 🔥 LLM 抽 concepts
    - concepts find-by-link dedup
-   - concepts write / update
+   - concepts write --extractions '[{"source_id":"...","quote_span":"..."}]' \
+     --prompt-version extract-v1
    - sources commit
 4. concepts uncertified vault            → 待检 list
 5. for each uncertified:
@@ -164,6 +166,37 @@ for it in items:
     print(it['source_id'], it['status'])
 "
 ```
+
+
+
+## 删 source 的工作流
+
+```bash
+# 1. 先 dry-run 看会 orphan 哪些 concept
+corpus-bot sources delete <vault> <sid>
+
+# 2. 看到 "will orphan: [...]" 评估是否真的删
+# 3. 真的删：
+corpus-bot sources delete <vault> <sid> --yes --reason version-update
+
+# 结果：
+# - sources.status = 'deleted'（软删，physical file 保留）
+# - concept.source_ids 自动移除这个 sid
+# - 如果 concept 因此失去所有 source → 自动 is_orphan=1
+# - agent 后续可以：
+#   - concepts list <vault> --orphans  # 看哪些 concept 变成孤儿
+#   - concepts add-source <vault> <slug> --source-id <new-sid> --quote-span "..."  # 补充 source
+```
+
+## 为什么 write_concept 强制 quote_span
+
+`extractions` 表是 source ↔ concept 的中间表，记录**抽取时刻的元数据 + 原文证据**：
+
+- `quote_span`：原始 markdown 里支撑这个 concept 存在的**具体文字片段**
+- `extracted_at` / `extracted_by` / `prompt_version`：审计与重新抽取的依据
+- `source_content_hash`：防止 source 改后审计失效
+
+不传 quote_span = concept 是"无源之水"——质量认证时无法判断证据、无法追溯历史、无法精准重抽。
 
 ## 不做的事（agent 自己负责）
 

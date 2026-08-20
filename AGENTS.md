@@ -35,10 +35,17 @@ corpus-bot vault init <path>
 corpus-bot sources ingest <vault> <file>
 corpus-bot sources batch <vault> <dir> --glob "*.md"
 
-# 写 / 查 concept（agent 自己用 LLM 生成 body）
-corpus-bot concepts write <vault> --slug X --title Y --body Z --source-ids ... --links ...
+# 写 / 查 concept（agent 自己用 LLM 生成 body + **必传 quote_span**）
+corpus-bot concepts write <vault> --slug X --title Y --body Z     --extractions '[{"source_id":"SID","quote_span":"原文片段..."}]'     --prompt-version extract-v1     --links ...
 corpus-bot concepts show <vault> <slug>
 corpus-bot concepts search <vault> <query>
+corpus-bot concepts evidence <vault> <slug>  # 查抽取证据
+
+# 维护 vault
+corpus-bot sources delete <vault> <sid>     # 默认 dry-run，看 orphan 影响
+corpus-bot concepts list <vault> --orphans    # 看无源 concept
+corpus-bot concepts add-source <vault> <slug> --source-id SID --quote-span "..."
+corpus-bot index sync <vault>               # 导出 wiki/index/*.json
 
 # 质检
 corpus-bot concepts uncertified <vault>
@@ -63,6 +70,25 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 | `vault.py` | 七条 validate_source_path + 文件布局 |
 | `ids.py` | content-hash + slugify |
 | `errors.py` | 错误分层（ConfigError / ValidationError / ConflictError / StorageError）|
+
+
+
+## source ↔ concept 映射（核心数据模型）
+
+| 表 | 记录什么 | 用途 |
+|---|---|---|
+| `concepts.source_ids` | concept 来自哪些 source 的 ID（JSON array，set 语义） | 反向索引、UI 显示 |
+| `extractions` | source 抽 concept 的**元数据 + 证据**（quote_span / extracted_at / prompt_version / source_content_hash）| 审计、级联删除、重新抽取 |
+| `concepts.is_orphan` | 1 = source_ids 为空 | 标记"无源 concept"——需要补 source 或整篇删 |
+| `cooccurrence` | 两个 concept 在同一 source 里同时出现过 | Stage 2 synthesis 候选发现 |
+| `links` | concept → concept 的 wikilink | 知识图谱 |
+
+**关键操作语义**：
+
+- `sources delete <sid>`（软删）：`status='deleted'`，自动从引用它的 concept.source_ids 移除；**不级联删 concept**
+- 如果删后 concept.source_ids 变空 → 自动 `is_orphan=1`
+- `concepts write --extractions '[...]'`：**强制每个 source 一段 quote_span 原文证据**
+- 同一 (source, concept) 可多次抽取，每次都记 extractions 一行（audit history）
 
 ## 行为规范
 
