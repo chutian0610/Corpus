@@ -1112,3 +1112,93 @@ def test_migration_v3_to_v4_adds_ingest_log(tmp_path: Path):
         assert len(rows) == 1
         assert rows[0]["op"] == "stage"
         assert rows[0]["source_id"] == "post-mig"
+
+
+# ---------- dedup_candidate_scores ----------
+
+def test_dedup_candidate_scores_basic(db: Path, staged_source: str):
+    """dedup_candidate_scores 返多维度分数 (discrete / fuzzy / length_diff)."""
+    from corpus.storage import dedup_candidate_scores, write_concept
+    write_concept(
+        db, slug="postgres", title="Postgres", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    write_concept(
+        db, slug="postgres-mvcc", title="MVCC", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    write_concept(
+        db, slug="wal", title="WAL of PostgreSQL", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+
+    candidates = dedup_candidate_scores(db, "postgres")
+    slugs = [c["slug"] for c in candidates]
+    # 3 个相关: postgres (exact 1.0), postgres-mvcc (startswith 0.9), wal (title 0.4)
+    assert "postgres" in slugs
+    assert "postgres-mvcc" in slugs
+    assert "wal" in slugs  # title contains 'postgres' (case-insensitive)
+
+    # postgres 是 exact, match_score 应该 1.0
+    pg = next(c for c in candidates if c["slug"] == "postgres")
+    assert pg["discrete_score"] == 1.0
+    assert pg["fuzzy_score"] >= 0.0
+    assert pg["match_score"] == 1.0
+    assert pg["length_diff"] == 0
+    assert pg["source_count"] == 1
+
+
+def test_dedup_candidate_scores_fuzzy(db: Path, staged_source: str):
+    """fuzzy_score 抓拼写错误 (postgers -> postgres)."""
+    from corpus.storage import dedup_candidate_scores, write_concept
+    write_concept(
+        db, slug="postgres", title="Postgres", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+
+    # 搜 'postgers' (拼写错误)
+    candidates = dedup_candidate_scores(db, "postgers")
+    # 应该匹配到 postgres (fuzzy 抓, 不靠 discrete)
+    assert len(candidates) >= 1
+    assert candidates[0]["slug"] == "postgres"
+    # discrete=0 (无 exact/startswith/contains), 全靠 fuzzy
+    assert candidates[0]["discrete_score"] == 0.0
+    assert candidates[0]["fuzzy_score"] > 0
+    # match_score > 0.1 (阈值过滤), 证明 fuzzy 起了作用
+    assert candidates[0]["match_score"] > 0.1
+
+
+def test_dedup_candidate_scores_no_match(db: Path, staged_source: str):
+    """完全无关 slug 不出现在 candidates."""
+    from corpus.storage import dedup_candidate_scores, write_concept
+    write_concept(
+        db, slug="kafka", title="Apache Kafka", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    # 搜 'postgres' -- 'kafka' 完全无关, 不返
+    candidates = dedup_candidate_scores(db, "postgres")
+    assert all(c["slug"] != "kafka" for c in candidates)
+
+
+# ---------- export_index 含 concept_id / created_at ----------
+
+def test_export_index_includes_concept_id_and_created_at(db: Path, staged_source: str, tmp_path: Path):
+    """export_index 写的 concepts.json 含 concept_id + created_at 字段 (之前漏了)."""
+    from corpus.storage import write_concept, export_index
+    write_concept(
+        db, slug="x", title="X", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    out_dir = tmp_path / "wiki_index"
+    export_index(db, out_dir)
+    import json
+    data = json.loads((out_dir / "concepts.json").read_text())
+    assert data["total"] == 1
+    c = data["concepts"][0]
+    assert c["slug"] == "x"
+    # 这些字段之前漏了, 现在必须有
+    assert "concept_id" in c
+    assert c["concept_id"].startswith("c_")
+    assert "created_at" in c
+    assert "version" in c
+    assert c["version"] == 0

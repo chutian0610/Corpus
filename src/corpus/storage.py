@@ -1390,43 +1390,104 @@ def list_uncertified_concepts(
 def find_concept_by_link(db_path: Path, link_target: str) -> list[dict[str, Any]]:
     """解析 [[wikilink]] → candidate concept list, 按 match_score 倒序 + slug 长度正序.
 
-    评分:
+    评分 = discrete 几档 + difflib continuous bonus:
       1.0  exact slug match
       0.9  slug startswith target
       0.5  slug contains target (substring)
-      0.4  title contains target (case-insensitive, 不区分大小写)
+      0.4  title contains target (case-insensitive)
+      + difflib.SequenceMatcher.ratio() * 0.3 (capped at 1.0)
 
-    score == 0 的完全不相关过滤掉; 放宽 LIMIT 50 (旧 10 太紧).
-    corpus-bot 设计接受小规模 (< 10k concepts), 全表扫描 OK.
+    score == 0 的完全不相关过滤掉; 放宽 LIMIT 50.
+    跨 slug 拼写错误 ("postgers" -> "postgres") 由 difflib fuzzy 抓.
+
+    corpus 设计接受小规模 (< 10k concepts), 全表扫描 OK.
+
+    注: 'dedup-candidates' CLI 命令返多维度分数 (discrete / fuzzy / length_diff),
+    让 LLM 自己用 LLM 二次判断 '这两个 concept 真的是同一个吗' (string 相似不够).
     """
+    candidates = dedup_candidate_scores(db_path, link_target, limit=50)
+    if not candidates:
+        return []
+    # 拿全部 concept detail (复用现有 SELECT *)
+    target_slugs = {c["slug"] for c in candidates}
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM concepts WHERE slug IN ({})".format(
+                ",".join("?" * len(target_slugs))
+            ),
+            list(target_slugs),
+        ).fetchall()
+    full_by_slug = {r["slug"]: dict(r) for r in rows}
+    out = []
+    for c in candidates:
+        d = full_by_slug.get(c["slug"])
+        if d is None:
+            continue
+        d["source_ids"] = _parse_json_list(d["source_ids"])
+        d["links"] = _parse_json_list(d["links"])
+        d["is_orphan"] = bool(d["is_orphan"])
+        d["match_score"] = c["match_score"]
+        out.append(d)
+    return out
+
+
+def dedup_candidate_scores(
+    db_path: Path,
+    link_target: str,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """返 dedup 候选 + 多维度分数, 让 LLM 二次判断.
+
+    每个 candidate 含:
+      - slug / title / source_count (基本信息)
+      - discrete_score: 0-1 离散几档 (exact / startswith / contains / title_contains)
+      - fuzzy_score: difflib.SequenceMatcher.ratio() * 0.3 (连续相似度)
+      - length_diff: abs(len(slug) - len(target_slug)) (同 score 时短 slug 优先)
+      - match_score: min(1.0, discrete + fuzzy) (综合)
+
+    LLM 拿到这 view 后, 用自己的 LLM 能力判断 '这两个 concept 真的是同一个吗'
+    (string 相似不够, 比如 'postgres-mvcc' 和 'postgresql-mv' 字符相似但语义不同).
+    """
+    import difflib
     from .ids import slugify
     target_slug = slugify(link_target)
     target_lower = link_target.lower().strip()
     with connect(db_path) as conn:
-        rows = conn.execute("SELECT * FROM concepts").fetchall()
+        rows = conn.execute("SELECT slug, title, source_ids FROM concepts").fetchall()
     candidates: list[dict[str, Any]] = []
     for r in rows:
-        d = dict(r)
-        d["source_ids"] = _parse_json_list(d["source_ids"])
-        d["links"] = _parse_json_list(d["links"])
-        d["is_orphan"] = bool(d["is_orphan"])
-        slug = d["slug"]
-        title = d.get("title", "")
-        score = 0.0
+        slug = r["slug"]
+        title = r["title"] or ""
+        source_ids = _parse_json_list(r["source_ids"])
         if slug == target_slug:
-            score = 1.0
+            discrete = 1.0
         elif slug.startswith(target_slug):
-            score = 0.9
+            discrete = 0.9
         elif target_slug and target_slug in slug:
-            score = 0.5
+            discrete = 0.5
         elif target_lower and target_lower in title.lower():
-            score = 0.4
-        if score == 0.0:
+            discrete = 0.4
+        else:
+            discrete = 0.0
+        # continuous bonus: difflib SequenceMatcher (Levenshtein-like)
+        # 拼写错误 ("postgers" -> "postgres") 由 fuzzy 抓, 不靠 discrete
+        fuzzy = difflib.SequenceMatcher(None, target_slug, slug).ratio() * 0.3
+        match_score = min(1.0, discrete + fuzzy)
+        if match_score < 0.1:
+            # 太弱 (discrete=0 + fuzzy<0.33) 过滤掉, 避免噪音
             continue
-        d["match_score"] = round(score, 3)
-        candidates.append(d)
-    candidates.sort(key=lambda c: (-c["match_score"], len(c["slug"])))
-    return candidates[:50]
+        candidates.append({
+            "slug": slug,
+            "title": title,
+            "source_count": len(source_ids),
+            "discrete_score": round(discrete, 3),
+            "fuzzy_score": round(fuzzy, 3),
+            "length_diff": abs(len(slug) - len(target_slug)),
+            "match_score": round(match_score, 3),
+        })
+    candidates.sort(key=lambda c: (-c["match_score"], c["length_diff"]))
+    return candidates[:limit]
 
 
 # ============================================================================
@@ -1670,8 +1731,9 @@ def export_index(db_path: Path, wiki_index_dir: Path) -> dict[str, Any]:
     wiki_index_dir.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
         concepts_rows = conn.execute(
-            """SELECT slug, title, source_ids, links,
-                      is_orphan, certified_score, certified_at, updated_at
+            """SELECT slug, concept_id, title, source_ids, links,
+                      is_orphan, version, certified_score, certified_at,
+                      created_at, updated_at
             FROM concepts ORDER BY slug"""
         ).fetchall()
         sources_rows = conn.execute(

@@ -21,6 +21,7 @@ from .ids import source_id_from_content
 from .storage import (
     SCHEMA_VERSION,
     add_source_to_concept,
+    dedup_candidate_scores,
     list_ingest_log,
     certification_stats,
     commit_source,
@@ -778,10 +779,61 @@ def concepts_search(vault_path: Path, query: str, limit: int, as_json: bool) -> 
 @click.argument("link")
 @click.option("--json", "as_json", is_flag=True)
 def concepts_find_by_link(vault_path: Path, link: str, as_json: bool) -> None:
-    """解析 wikilink → candidate concept list（dedup 用）。"""
+    """解析 wikilink → candidate concept list（dedup 用）.
+
+    评分: discrete (exact/startswith/contains/title) + difflib fuzzy bonus.
+    """
     paths = _resolve_db(vault_path)
     items = find_concept_by_link(paths["corpus_db"], link)
     _emit(items, as_json=as_json)
+
+
+@concepts.command(name="dedup-candidates")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.argument("slug")
+@click.option("--limit", "-n", type=int, default=20, help="最多返 N 个候选 (默认 20)")
+@click.option("--json", "as_json", is_flag=True)
+def concepts_dedup_candidates(
+    vault_path: Path, slug: str, limit: int, as_json: bool,
+) -> None:
+    """返 dedup 候选 + 多维度分数, 让 LLM 二次判断 '这两个 concept 真的是同一个吗'.
+
+    字段:
+      - discrete_score (0-1): 离散几档 (exact/startswith/contains/title_contains)
+      - fuzzy_score (0-0.3): difflib.SequenceMatcher.ratio() 连续相似度
+      - length_diff: |len(slug) - len(target)| (同 score 时短 slug 优先)
+      - match_score (0-1): min(1.0, discrete + fuzzy) 综合
+
+    比 find-by-link 多了 fuzzy 细节, 让 LLM 知道 'score=0.7' 怎么来的 (discrete 0.4 + fuzzy 0.3
+    vs discrete 0.9 + fuzzy 0.0 含义不同). LLM 拿到后用自己语义能力判断.
+
+    不调 LLM, 纯 storage 计算. LLM 决策权在 agent 端.
+    """
+    paths = _resolve_db(vault_path)
+    candidates = dedup_candidate_scores(paths["corpus_db"], slug, limit=limit)
+    if as_json:
+        _emit(
+            {
+                "query": slug,
+                "total": len(candidates),
+                "candidates": candidates,
+            },
+            as_json=True,
+        )
+        return
+    if not candidates:
+        _emit(f"(no candidates for: {slug})", as_json=False)
+        return
+    click.echo(f"dedup candidates for '{slug}' ({len(candidates)} entries):")
+    for c in candidates:
+        click.echo(
+            f"  match={c['match_score']:.3f}  "
+            f"discrete={c['discrete_score']:.2f}  "
+            f"fuzzy={c['fuzzy_score']:.2f}  "
+            f"len_diff={c['length_diff']:>2}  "
+            f"sources={c['source_count']:>2}  "
+            f"{c['slug']:<32} {c['title']}"
+        )
 
 
 @concepts.command(name="uncertified")
