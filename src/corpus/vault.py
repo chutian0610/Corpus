@@ -43,15 +43,13 @@ META_DIR = ".wiki-meta"
 CORPUS_DB = "corpus.db"
 
 
-_INITIAL_GITIGNORE = """# corpus-bot vault runtime data (SQLite + git history)
+_INITIAL_GITIGNORE = """# corpus vault runtime data (SQLite + .wiki-meta/)
+# vault 是独立 git 仓库, 这些不入版本控制.
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
-.wiki-meta/corpus.db
-.wiki-meta/corpus.db-journal
-.wiki-meta/corpus.db-wal
-.wiki-meta/corpus.db-shm
+.wiki-meta/
 """
 
 _GITKEEP_REL_PATHS = ("raw", "wiki/concept", "wiki/index")
@@ -211,10 +209,7 @@ def ensure_vault(vault_root: Path) -> dict[str, Path]:
     paths["wiki_index"].mkdir(parents=True, exist_ok=True)
     paths["meta"].mkdir(parents=True, exist_ok=True)
 
-    # gitignore .wiki-meta/  (让 daemon 元数据不进 git)
-    gitignore = paths["meta"] / ".gitignore"
-    if not gitignore.exists():
-        gitignore.write_text("# corpus 元数据\n*\n!.gitignore\n")
+    # 不再写 .wiki-meta/.gitignore: vault 根 .gitignore 已排除整个 .wiki-meta/
 
     return paths
 

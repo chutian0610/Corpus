@@ -22,7 +22,7 @@ def test_vault_init_creates_dirs(vault: Path):
     assert (vault / "raw").is_dir()
     assert (vault / "wiki" / "concept").is_dir()
     assert (vault / ".wiki-meta").is_dir()
-    assert (vault / ".wiki-meta" / ".gitignore").is_file()
+    # .wiki-meta/.gitignore 不再创建 (vault 根 .gitignore 覆盖整个 .wiki-meta/)
 
 
 def test_validate_existing_file(vault: Path):
@@ -184,13 +184,13 @@ def test_vault_init_initial_commit(vault: Path):
     # .gitignore 存在且排除 *.db
     gi = (new_vault / ".gitignore").read_text()
     assert "*.db" in gi
-    assert ".wiki-meta/corpus.db" in gi
+    assert ".wiki-meta/" in gi  # 整个 .wiki-meta/ 排除
 
     # raw/ / wiki/concept/ / wiki/index/ 都有 .gitkeep
     for sub in ("raw", "wiki/concept", "wiki/index"):
         assert (new_vault / sub / ".gitkeep").exists()
 
-    # corpus.db 不在 commit 里 (被 gitignore 排除)
+    # .wiki-meta/ 整个目录不入 commit (vault 独立 git)
     log = subprocess.run(
         ["git", "-C", str(new_vault), "log", "--name-only", "--pretty=format:"],
         capture_output=True, text=True, check=True,
@@ -198,5 +198,5 @@ def test_vault_init_initial_commit(vault: Path):
     committed_files = [f for f in log.split("\n") if f]
     assert ".gitignore" in committed_files
     assert "raw/.gitkeep" in committed_files
-    assert ".wiki-meta/corpus.db" not in committed_files
-    assert ".wiki-meta/.gitignore" in committed_files  # .wiki-meta/ 内的 .gitignore 排除 *.db
+    assert ".wiki-meta/" not in committed_files
+    assert ".wiki-meta/.gitignore" not in committed_files  # 已删 (vault 根 .gitignore 覆盖)
