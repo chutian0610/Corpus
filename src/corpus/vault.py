@@ -133,17 +133,16 @@ def _initial_git_commit(vault_root: Path) -> dict[str, Any]:
     }
 
 
-def _ensure_git_repo(
-    vault_root: Path,
-    *,
-    auto_commit: bool = True,
-) -> dict[str, Any]:
-    """在 vault_root 跑 'git init' (幂等) + 可选 initial commit. 返回 git 操作结果.
+def _ensure_git_repo(vault_root: Path) -> dict[str, Any]:
+    """在 vault_root 跑 'git init' (强制) + initial commit. 返回 git 操作结果.
+
+    强制行为 (无法 opt-out):
+      - git init --initial-branch=main (vault 独立 git 仓库)
+      - initial commit (写 .gitignore + .gitkeep 占位 + 'chore: init corpus vault')
 
     - vault_root/.git/ 已存在 → 不重复 init, 返回 'git_initialized': False
     - git 不在 PATH → 返回 {'git_initialized': False, 'reason': 'git not in PATH'}
     - 其它 git 错误 → raise StorageError (vault init 失败, 不算 vault 的错)
-    - auto_commit=True (默认) → 写 .gitignore / .gitkeep 占位 + initial commit
     """
     import shutil
     import subprocess
@@ -172,10 +171,8 @@ def _ensure_git_repo(
                 f"git init failed (rc={result.returncode}): {result.stderr.strip()}"
             )
 
-    # initial commit (默认)
-    commit_info = None
-    if auto_commit:
-        commit_info = _initial_git_commit(vault_root)
+    # initial commit (强制)
+    commit_info = _initial_git_commit(vault_root)
 
     return {
         "git_initialized": not already_repo,

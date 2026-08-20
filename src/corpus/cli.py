@@ -153,32 +153,29 @@ def vault() -> None:
 
 @vault.command(name="init")
 @click.argument("vault_path", type=click.Path(path_type=Path))
-@click.option("--git/--no-git", default=True,
-              help="默认 git init (vault 独立 git 仓库). --no-git 跳过.")
-@click.option("--git-commit/--no-git-commit", "git_commit", default=True,
-              help="默认 initial commit (写 .gitignore 排除 *.db + .gitkeep 占位 + commit). --no-git-commit 跳过.")
 @click.option("--json", "as_json", is_flag=True, help="以 JSON 格式输出")
 def vault_init(
-    vault_path: Path, git: bool, git_commit: bool, as_json: bool,
+    vault_path: Path, as_json: bool,
 ) -> None:
     """初始化 vault 目录结构 (创建 vault root + raw/ + wiki/ + .wiki-meta/ + corpus.db).
 
     vault root 不存在时会自动创建 (mkdir -p 语义). 已初始化的 vault 跑 init 是幂等的.
-    默认同时在 vault root 跑 'git init --initial-branch=main' (vault 独立 git 仓库,
-    让 wiki/concept/*.md 等可以被 git 跟踪) + initial commit (写 .gitignore 排除
-    *.db + raw/wiki/concept/wiki/index/ 加 .gitkeep 占位 + 'chore: init corpus vault').
 
-    跳过: --no-git (连 git init 都不要); --no-git-commit (git init 但不 commit).
+    强制行为 (无法关闭):
+      1. git init --initial-branch=main (vault 独立 git 仓库)
+      2. 写 vault 根 .gitignore 排除 *.db / *.db-* / .wiki-meta/
+      3. raw/ / wiki/concept/ / wiki/index/ 加 .gitkeep 占位
+      4. git config user.email=corpus@localhost user.name=corpus (local)
+      5. initial commit 'chore: init corpus vault'
+
+    git 不在 PATH 时: skip git init (报 reason 'git not in PATH'), vault 仍可用.
     """
     vault_path.mkdir(parents=True, exist_ok=True)
     paths = ensure_vault(vault_path)
     if not is_initialized(paths["corpus_db"]):
         init_db(paths["corpus_db"])
 
-    if git:
-        git_info = _ensure_git_repo(vault_path, auto_commit=git_commit)
-    else:
-        git_info = {"git_initialized": False, "reason": "--no-git", "commit": None}
+    git_info = _ensure_git_repo(vault_path)
 
     _emit(
         {

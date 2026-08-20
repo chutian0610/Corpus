@@ -61,9 +61,7 @@ Idempotent. Running on an existing vault returns schema info without errors. The
 - `git -C <vault> config user.email/user.name` (local only, 设为 `corpus@localhost` / `corpus`)
 - `git add -A && git commit -m 'chore: init corpus vault'`
 
-跳过选项:
-- `--no-git` — 连 git init 都不要
-- `--no-git-commit` — git init 但不 initial commit (用户/agent 自己 commit 后续)
+**强制行为, 无法 opt-out**: 不再有 `--no-git` / `--no-git-commit` flag, git 永远是 default. (要 skip 只能不安装 git.)
 
 返回 JSON `git.commit.commit_sha` 字段有 commit SHA (40-hex), 可用于后续 `git reset` 等.
 

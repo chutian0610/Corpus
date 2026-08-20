@@ -150,19 +150,6 @@ def test_vault_init_default_git_init(vault: Path):
     assert (new_vault / ".git").exists()
 
 
-def test_vault_init_no_git_flag(vault: Path):
-    """vault_init --no-git 跳过 git init."""
-    from click.testing import CliRunner
-    from corpus.cli import cli
-    new_vault = vault.parent / "new-vault-nogit"
-    res = CliRunner().invoke(cli, ["vault", "init", str(new_vault), "--no-git", "--json"])
-    assert res.exit_code == 0, res.stderr
-    parsed = json.loads(res.output)
-    assert parsed["git"]["git_initialized"] is False
-    assert "--no-git" in parsed["git"]["reason"]
-    assert not (new_vault / ".git").exists()
-
-
 def test_vault_init_initial_commit(vault: Path):
     """vault init 默认 initial commit, .gitignore + .gitkeep + corpus.db (被 gitignore)."""
     import subprocess
