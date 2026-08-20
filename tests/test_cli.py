@@ -538,3 +538,25 @@ def test_find_by_link_returns_match_score_sorted(vault: Path):
     # 第一个 score 最高
     scores = [c["match_score"] for c in items]
     assert scores == sorted(scores, reverse=True)
+
+
+# ---------- vault init 修复 (vault root 不存在应自动 mkdir) ----------
+
+def test_vault_init_creates_root_if_missing(tmp_path: Path):
+    """`vault init <newpath>` 应等价 mkdir -p + 建子目录 + init db."""
+    new_vault = tmp_path / "deeply" / "nested" / "myvault"
+    assert not new_vault.exists()
+    res = _runner().invoke(cli, ["vault", "init", str(new_vault), "--json"])
+    assert res.exit_code == 0, res.stderr
+    assert new_vault.exists()
+    assert (new_vault / "raw").is_dir()
+    assert (new_vault / "wiki" / "concept").is_dir()
+    assert (new_vault / ".wiki-meta" / "corpus.db").is_file()
+
+
+def test_vault_init_idempotent_on_existing(vault: Path):
+    """已初始化的 vault 再 init 不应出错."""
+    res = _runner().invoke(cli, ["vault", "init", str(vault), "--json"])
+    assert res.exit_code == 0, res.stderr
+    # raw/ 还在
+    assert (vault / "raw").is_dir()

@@ -19,6 +19,7 @@ from . import __version__
 from .errors import CorpusBotError
 from .ids import source_id_from_content
 from .storage import (
+    SCHEMA_VERSION,
     add_source_to_concept,
     certification_stats,
     commit_source,
@@ -144,7 +145,11 @@ def vault() -> None:
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.option("--json", "as_json", is_flag=True, help="以 JSON 格式输出")
 def vault_init(vault_path: Path, as_json: bool) -> None:
-    """初始化 vault 目录结构（创建 raw/、wiki/、.wiki-meta/、corpus.db）。"""
+    """初始化 vault 目录结构 (创建 vault root + raw/ + wiki/ + .wiki-meta/ + corpus.db).
+
+    vault root 不存在时会自动创建 (mkdir -p 语义). 已初始化的 vault 跑 init 是幂等的.
+    """
+    vault_path.mkdir(parents=True, exist_ok=True)
     paths = ensure_vault(vault_path)
     if not is_initialized(paths["corpus_db"]):
         init_db(paths["corpus_db"])
@@ -157,7 +162,7 @@ def vault_init(vault_path: Path, as_json: bool) -> None:
             "wiki_index": str(paths["wiki_index"]),
             "meta": str(paths["meta"]),
             "corpus_db": str(paths["corpus_db"]),
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
         },
         as_json=as_json,
     )
