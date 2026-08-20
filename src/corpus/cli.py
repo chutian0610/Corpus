@@ -25,6 +25,7 @@ from .storage import (
     list_ingest_log,
     read_concept,
     write_concept_file,
+    write_source_file,
     certification_stats,
     commit_source,
     delete_concept,
@@ -327,7 +328,18 @@ def sources_ingest(vault_path: Path, source_file: Path, force_revive: bool, as_j
             original_filename=canonical.name,
             revive_on_deleted=force_revive,
         )
-        raw_path.write_text(content, encoding="utf-8")
+        # 写 raw/<file> frontmatter (source_id/content_hash/size_bytes/created_at)
+        # 替代 plain write_text, 让 raw/<file> 也是 source of truth (frontmatter 含 metadata)
+        write_source_file(
+            paths["root"],
+            raw_path,
+            source_id=result["source_id"],
+            original_filename=canonical.name,
+            content_hash=result["content_hash"],
+            size_bytes=result["size_bytes"],
+            status="staged",
+            body=content,
+        )
         action = "revived" if result.get("revived") else "staged"
         _emit(
             {

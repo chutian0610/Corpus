@@ -873,6 +873,7 @@ def read_concept_file(vault_root: Path, slug: str) -> dict[str, Any] | None:
 
 def write_source_file(
     vault_root: Path,
+    raw_path: Path,
     *,
     source_id: str,
     original_filename: str,
@@ -882,25 +883,13 @@ def write_source_file(
     created_at: str | None = None,
     body: str = "",
 ) -> Path:
-    """写 raw/<file>-ingest-...md frontmatter (raw file 含 source metadata).
+    """写 raw/<file> frontmatter (raw file 含 source metadata).
 
-    文件名: <original_filename-stem>-ingest-<UTC>.<ext> (跟 ingest 实际路径一致).
-    调用方负责生成 actual raw path (从 source_id 反查).
-
+    caller 传 raw_path (从 pick_raw_target 算出来, 不要函数自己找).
     body 是原始 markdown (用户提供).
+
+    替代 plain write_text, 让 raw/<file> 也是 source of truth.
     """
-    raw_dir = vault_root / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    # 找现有 raw/<file> (按 source_id frontmatter)
-    existing = _raw_path(vault_root, source_id)
-    if existing is not None:
-        path = existing
-    else:
-        # 新建: 用 original_filename
-        from .ids import rename_suffix
-        stem = Path(original_filename).stem
-        suffix = Path(original_filename).suffix
-        path = raw_dir / f"{stem}-{rename_suffix()}{suffix}"
     now = created_at or _utc_now_iso()
     meta = {
         "source_id": source_id,
@@ -910,8 +899,8 @@ def write_source_file(
         "status": status,
         "created_at": now,
     }
-    _write_md(path, meta=meta, body=body)
-    return path
+    _write_md(raw_path, meta=meta, body=body)
+    return raw_path
 
 
 def read_source_file(path: Path) -> dict[str, Any] | None:

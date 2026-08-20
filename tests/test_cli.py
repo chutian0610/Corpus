@@ -66,7 +66,7 @@ def test_batch_handles_already_ingested_source(vault: Path, external: Path):
     assert '"duplicates": 1' in res.output   # note.md 同 hash 跳过
 
     # raw/ 下应该有 2 个文件 (v1 的 ingest-<ts> + v2 的 ingest-<ts>)
-    raw_files = sorted(p.name for p in (vault / "raw").iterdir())
+    raw_files = sorted(p.name for p in (vault / "raw").iterdir() if p.name != ".tmp")
     assert len(raw_files) == 2
     for f in raw_files:
         assert re.search(r"ingest-\d{8}-\d{6}", Path(f).stem)
@@ -574,7 +574,7 @@ def test_ingest_rejects_path_inside_raw(vault: Path, external: Path):
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     assert res.exit_code == 0
     # raw/ 里有 x-ingest-<ts>.md, 拿真实路径再 ingest
-    raw_files = list((vault / "raw").iterdir())
+    raw_files = [p for p in (vault / "raw").iterdir() if p.name != ".tmp"]
     assert len(raw_files) == 1
     target = raw_files[0]
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(target), "--json"])
