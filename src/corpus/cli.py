@@ -23,6 +23,7 @@ from .storage import (
     add_source_to_concept,
     dedup_candidate_scores,
     list_ingest_log,
+    read_concept,
     write_concept_file,
     certification_stats,
     commit_source,
@@ -59,6 +60,38 @@ from .vault import (
 )
 from .atomic import atomic_write_text
 from .lock import vault_file_lock  # utility (CLI 默认不用)
+
+
+
+
+def _sync_concept_file(paths, slug: str) -> None:
+    """从 DB 读最新 concept fields, 重写 wiki/concept/<slug>.md frontmatter.
+
+    同步点: 任何写 DB 的命令 (write/update/add-source/remove-source/remove-extraction/
+    certify) 调一下, 保持 markdown 文件 = DB view. recovery 时从 markdown 还原 DB.
+    """
+    info = read_concept(paths["corpus_db"], slug)
+    if info is None:
+        return
+    write_concept_file(
+        paths["root"],
+        slug=slug,
+        title=info["title"],
+        body=info["body"],
+        source_ids=info["source_ids"],
+        links=info["links"],
+        version=info.get("version", 0),
+        created_at=info.get("created_at"),
+        updated_at=info.get("updated_at"),
+        certified_at=info.get("certified_at"),
+        certified_score=info.get("certified_score"),
+        certified_issues=info.get("certified_issues"),
+        certified_suggestions=info.get("certified_suggestions"),
+        aliases=info.get("aliases"),
+        status=info.get("status") or "draft",
+        tags=info.get("tags"),
+    )
+
 
 
 # ---------- helpers ----------
@@ -669,23 +702,11 @@ def concepts_update(
             prompt_version=prompt_version,
             expected_version=expected_version,
         )
-        # 物理写文件 (body 改了时)
-        if body is not None or title is not None:
-            wiki_path = paths["wiki_concept"] / f"{slug}.md"
-            # read 现 body, 拼新 frontmatter
-            from .storage import read_concept
-            current = read_concept(paths["corpus_db"], slug) or {}
-            new_body = body if body is not None else current.get("body", "")
-            new_title = title if title is not None else current.get("title", slug)
-            frontmatter = f"---\nslug: {slug}\ntitle: {new_title}\n---\n\n"
-            try:
-                atomic_write_text(wiki_path, frontmatter + new_body, encoding="utf-8")
-            except OSError as e:
-                _err(
-                    f"failed to write wiki file {wiki_path}: {e}",
-                    hint="DB 已更新; 需手工修复 wiki 文件或 delete + 重 write",
-                )
-            result["wiki_path"] = str(wiki_path)
+        # 物理写文件 (DB 已更新, 同步 frontmatter 反映最新 metadata)
+        if body is not None or title is not None or add_extractions is not None or link_list is not None:
+            _sync_concept_file(paths, slug)
+            info = read_concept(paths["corpus_db"], slug) or {}
+            result["wiki_path"] = str(paths["wiki_concept"] / f"{slug}.md")
         export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
@@ -891,6 +912,9 @@ def concepts_certify(
         )
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
+    # 同步 frontmatter (certified_at / score / issues / suggestions 写进 markdown)
+    _sync_concept_file(paths, slug)
+    export_index(paths["corpus_db"], paths["wiki_index"])
     _emit(result, as_json=as_json)
 
 
@@ -942,6 +966,7 @@ def concepts_add_source(vault_path: Path, slug: str, source_id: str, quote_span:
             quote_span=quote_span, prompt_version=prompt_version,
         )
         export_index(paths["corpus_db"], paths["wiki_index"])
+        _sync_concept_file(paths, slug)
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
@@ -964,6 +989,7 @@ def concepts_remove_extraction(vault_path: Path, extraction_id: str, as_json: bo
     try:
         result = remove_extraction(paths["corpus_db"], extraction_id)
         export_index(paths["corpus_db"], paths["wiki_index"])
+        _sync_concept_file(paths, result["concept_slug"])
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
@@ -980,6 +1006,7 @@ def concepts_remove_source(vault_path: Path, slug: str, source_id: str, as_json:
     try:
         result = remove_source_from_concept(paths["corpus_db"], slug, source_id)
         export_index(paths["corpus_db"], paths["wiki_index"])
+        _sync_concept_file(paths, slug)
     except Exception as e:
         _err(str(e))
     _emit(result, as_json=as_json)
