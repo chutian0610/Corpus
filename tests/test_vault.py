@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import json
 import pytest
 
 from corpus.vault import ensure_vault, validate_source_path
@@ -112,3 +113,51 @@ def test_pick_raw_target_preserves_no_extension(vault: Path):
     assert target.suffix == ""
     assert _INGEST_RE.search(target.stem)
     assert target.stem.startswith("README-ingest-")
+
+
+# ---------- _ensure_git_repo ----------
+
+def test_ensure_git_repo_idempotent(vault: Path):
+    """vault 已是 git 仓库 → _ensure_git_repo 不重复 init."""
+    import subprocess
+    # 先手动 git init (setup)
+    subprocess.run(["git", "init", "--initial-branch=main", str(vault)],
+                   check=True, capture_output=True)
+    from corpus.vault import _ensure_git_repo
+    info = _ensure_git_repo(vault)
+    assert info["git_initialized"] is False
+    assert "already" in info["reason"].lower() or "git repository" in info["reason"]
+
+
+def test_ensure_git_repo_creates_repo(vault: Path):
+    """空 vault → _ensure_git_repo 创建 .git/."""
+    from corpus.vault import _ensure_git_repo
+    info = _ensure_git_repo(vault)
+    assert info["git_initialized"] is True
+    assert info["git_path"].endswith(".git")
+    assert (vault / ".git").exists()
+
+
+def test_vault_init_default_git_init(vault: Path):
+    """vault_init 默认会调 git init."""
+    from click.testing import CliRunner
+    from corpus.cli import cli
+    new_vault = vault.parent / "new-vault-git"
+    res = CliRunner().invoke(cli, ["vault", "init", str(new_vault), "--json"])
+    assert res.exit_code == 0, res.stderr
+    parsed = json.loads(res.output)
+    assert parsed["git"]["git_initialized"] is True
+    assert (new_vault / ".git").exists()
+
+
+def test_vault_init_no_git_flag(vault: Path):
+    """vault_init --no-git 跳过 git init."""
+    from click.testing import CliRunner
+    from corpus.cli import cli
+    new_vault = vault.parent / "new-vault-nogit"
+    res = CliRunner().invoke(cli, ["vault", "init", str(new_vault), "--no-git", "--json"])
+    assert res.exit_code == 0, res.stderr
+    parsed = json.loads(res.output)
+    assert parsed["git"]["git_initialized"] is False
+    assert "--no-git" in parsed["git"]["reason"]
+    assert not (new_vault / ".git").exists()

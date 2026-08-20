@@ -43,6 +43,47 @@ META_DIR = ".wiki-meta"
 CORPUS_DB = "corpus.db"
 
 
+def _ensure_git_repo(vault_root: Path) -> dict[str, Any]:
+    """在 vault_root 跑 'git init' (幂等). 返回 {'git_initialized', 'git_path'}.
+
+    - vault_root/.git/ 已存在 → 不重复 init, 返回 'git_initialized': False
+    - git 不在 PATH → 返回 {'git_initialized': False, 'reason': 'git not in PATH'}
+    - 其它 git 错误 → raise StorageError (vault init 失败, 不算 vault 的错)
+    """
+    import shutil
+    import subprocess
+    from .errors import StorageError
+
+    if not shutil.which("git"):
+        return {"git_initialized": False, "reason": "git not in PATH"}
+
+    git_dir = vault_root / ".git"
+    if git_dir.exists():
+        return {"git_initialized": False, "reason": "already a git repository"}
+
+    try:
+        result = subprocess.run(
+            ["git", "init", "--initial-branch=main", str(vault_root)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise StorageError(f"git init timed out: {e}") from e
+    except OSError as e:
+        raise StorageError(f"git init failed: {e}") from e
+
+    if result.returncode != 0:
+        raise StorageError(
+            f"git init failed (rc={result.returncode}): {result.stderr.strip()}"
+        )
+
+    return {
+        "git_initialized": True,
+        "git_path": str(git_dir),
+    }
+
+
 def vault_paths(vault_root: Path) -> dict[str, Path]:
     """返回 vault 标准路径表。"""
     return {

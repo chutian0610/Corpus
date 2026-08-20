@@ -46,6 +46,7 @@ from .storage import (
     write_concept,
 )
 from .vault import (
+    _ensure_git_repo,
     assert_source_outside_vault,
     ensure_vault,
     pick_raw_target,
@@ -150,16 +151,23 @@ def vault() -> None:
 
 @vault.command(name="init")
 @click.argument("vault_path", type=click.Path(path_type=Path))
+@click.option("--git/--no-git", default=True,
+              help="默认 git init (vault 独立 git 仓库). --no-git 跳过.")
 @click.option("--json", "as_json", is_flag=True, help="以 JSON 格式输出")
-def vault_init(vault_path: Path, as_json: bool) -> None:
+def vault_init(vault_path: Path, git: bool, as_json: bool) -> None:
     """初始化 vault 目录结构 (创建 vault root + raw/ + wiki/ + .wiki-meta/ + corpus.db).
 
     vault root 不存在时会自动创建 (mkdir -p 语义). 已初始化的 vault 跑 init 是幂等的.
+    默认同时在 vault root 跑 'git init --initial-branch=main' (vault 独立 git 仓库,
+    让 wiki/concept/*.md 等可以被 git 跟踪). 用 --no-git 跳过.
     """
     vault_path.mkdir(parents=True, exist_ok=True)
     paths = ensure_vault(vault_path)
     if not is_initialized(paths["corpus_db"]):
         init_db(paths["corpus_db"])
+
+    git_info = _ensure_git_repo(vault_path) if git else {"git_initialized": False, "reason": "--no-git"}
+
     _emit(
         {
             "vault": str(vault_path),
@@ -170,6 +178,7 @@ def vault_init(vault_path: Path, as_json: bool) -> None:
             "meta": str(paths["meta"]),
             "corpus_db": str(paths["corpus_db"]),
             "schema_version": SCHEMA_VERSION,
+            "git": git_info,
         },
         as_json=as_json,
     )

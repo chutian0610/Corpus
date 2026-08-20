@@ -30,9 +30,8 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 ## Quick Start（agent 视角）
 
 ```bash
-# 1. 初始化 vault（一次性, 用 corpus-init skill）
-#    触发条件: "建 vault" / "vault init" / corpus --version 失败等
-#    -> 加载 .agents/skills/corpus-init/SKILL.md
+# 1. 初始化 vault (一次性, 触发 corpus-init skill)
+#    默认 git init, vault 是独立 git 仓库
 
 # 2. 落源（content-hash dedup，所有 ingest 都加 `-ingest-<UTC compact ISO>` 后缀；软删复活用 --force-revive）
 corpus sources ingest ~/my-wiki ~/notes/postgresql.md

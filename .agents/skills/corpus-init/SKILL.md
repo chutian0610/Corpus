@@ -46,7 +46,7 @@ vault 名建议:
 
 如果 vault 落在 git 仓库里, 提示用户把 `<vault_name>/` 加到 `.gitignore` (这是项目层决定, agent 不假设).
 
-## Step 2 — Initialize (cwd 下创建 <vault_name>/)
+## Step 2 — Initialize (cwd 下创建 <vault_name>/, 默认 git init)
 
 ```bash
 corpus vault init <vault_name> --json
@@ -54,6 +54,8 @@ corpus vault init <vault_name> --json
 ```
 
 Idempotent. Running on an existing vault returns schema info without errors. The vault root is created if missing (`mkdir -p` semantics).
+
+**默认同时跑 `git init --initial-branch=main`**, vault 是独立 git 仓库 (wiki/concept/*.md 可被 git 跟踪). 加 `--no-git` 跳过. vault 里 `.wiki-meta/corpus.db` 是 SQLite 运行时数据, 建议 commit 一个 `.gitignore` 把 `*.db` / `.wiki-meta/corpus.db*` 排除.
 
 Returns JSON:
 
@@ -66,7 +68,8 @@ Returns JSON:
   "wiki_index": "<path>/wiki/index",
   "meta": "<path>/.wiki-meta",
   "corpus_db": "<path>/.wiki-meta/corpus.db",
-  "schema_version": 2
+  "schema_version": 2,
+  "git": {"git_initialized": true, "git_path": "<path>/.git"}
 }
 ```
 
