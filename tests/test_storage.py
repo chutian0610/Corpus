@@ -1202,3 +1202,87 @@ def test_export_index_includes_concept_id_and_created_at(db: Path, staged_source
     assert "created_at" in c
     assert "version" in c
     assert c["version"] == 0
+
+
+# ---------- frontmatter + concept_file / source_file helpers ----------
+
+def test_write_concept_file_basic(tmp_path: Path):
+    from corpus.storage import write_concept_file, read_concept_file
+    path = write_concept_file(
+        tmp_path,
+        slug="postgresql-mvcc", title="PostgreSQL MVCC", body="## 定义\nMVCC.",
+        source_ids=["abc123", "def456"], links=["postgres", "wal"],
+        version=0, status="draft",
+    )
+    assert path.exists()
+    assert path.name == "postgresql-mvcc.md"
+    assert path.parent.name == "concept"
+
+    meta = read_concept_file(tmp_path, "postgresql-mvcc")
+    assert meta is not None
+    assert meta["slug"] == "postgresql-mvcc"
+    assert meta["title"] == "PostgreSQL MVCC"
+    assert meta["type"] == "concept"
+    assert meta["version"] == 0
+    assert meta["status"] == "draft"
+    assert meta["source_ids"] == ["abc123", "def456"]
+    assert meta["links"] == ["postgres", "wal"]
+    assert meta["_body"].lstrip() == "## 定义\nMVCC."
+
+
+def test_write_concept_file_with_certified(tmp_path: Path):
+    from corpus.storage import write_concept_file
+    write_concept_file(
+        tmp_path, slug="c", title="C", body="b",
+        certified_at="2026-08-20", certified_score=0.85,
+        certified_issues=["缺源"], certified_suggestions=["补 WAL"],
+    )
+    meta = read_concept_file_cached(tmp_path, "c")
+    assert meta["certified_at"] == "2026-08-20"
+    assert meta["certified_score"] == 0.85
+    assert meta["certified_issues"] == ["缺源"]
+    assert meta["certified_suggestions"] == ["补 WAL"]
+
+
+def test_read_concept_file_not_found(tmp_path: Path):
+    from corpus.storage import read_concept_file
+    assert read_concept_file(tmp_path, "nonexistent") is None
+
+
+def test_write_concept_file_atomic_overwrite(tmp_path: Path):
+    """重复写同 slug 应 atomic 覆盖 (没半写文件)."""
+    from corpus.storage import write_concept_file
+    p1 = write_concept_file(tmp_path, slug="x", title="V1", body="b1", version=0)
+    p2 = write_concept_file(tmp_path, slug="x", title="V2", body="b2", version=1)
+    assert p1 == p2  # same path
+    meta = read_concept_file_cached(tmp_path, "x")
+    assert meta["title"] == "V2"
+    assert meta["version"] == 1
+    # body 前面有换行 (frontmatter 后 \n\n 留一个空行)
+    assert meta["_body"].lstrip() == "b2"
+    assert meta["_body"].endswith("b2")
+
+
+def test_read_md_with_frontmatter_no_yaml(tmp_path: Path):
+    """无 frontmatter 的文件返 ({}, 全文)."""
+    from corpus.frontmatter import read_md_with_frontmatter
+    p = tmp_path / "x.md"
+    p.write_text("# Just a title\n\nNo yaml here.", encoding="utf-8")
+    meta, body = read_md_with_frontmatter(p)
+    assert meta == {}
+    assert "No yaml" in body
+
+
+def test_read_md_with_frontmatter_yaml_basic(tmp_path: Path):
+    from corpus.frontmatter import read_md_with_frontmatter, write_md_with_frontmatter
+    p = tmp_path / "x.md"
+    write_md_with_frontmatter(p, meta={"a": 1, "b": ["x", "y"], "c": "z"}, body="# Body")
+    meta, body = read_md_with_frontmatter(p)
+    assert meta == {"a": 1, "b": ["x", "y"], "c": "z"}
+    assert body.lstrip() == "# Body"
+
+
+# helper
+def read_concept_file_cached(vault_root, slug):
+    from corpus.storage import read_concept_file
+    return read_concept_file(vault_root, slug)

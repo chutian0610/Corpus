@@ -32,6 +32,10 @@ from typing import Any, Iterator
 
 from .atomic import atomic_write_text
 from .errors import ConflictError, StorageError
+from .frontmatter import (
+    read_md_with_frontmatter as _read_md,
+    write_md_with_frontmatter as _write_md,
+)
 
 SCHEMA_VERSION = 4
 
@@ -770,6 +774,154 @@ def dry_run_delete_source(db_path: Path, source_id: str) -> dict[str, Any]:
              ))
         ),
     }
+
+
+def _concept_path(vault_root: Path, slug: str) -> Path:
+    """wiki/concept/<slug>.md 路径."""
+    return vault_root / "wiki" / "concept" / f"{slug}.md"
+
+
+def _source_path(vault_root: Path, source_id: str) -> Path:
+    """wiki/source/<source_id>.md 路径."""
+    return vault_root / "wiki" / "source" / f"{source_id}.md"
+
+
+def _raw_path(vault_root: Path, source_id: str) -> Path:
+    """raw/<file>-ingest-...md 路径 (按 source_id 在 raw/ 找, 不唯一)."""
+    raw_dir = vault_root / "raw"
+    if not raw_dir.exists():
+        return None
+    for p in raw_dir.iterdir():
+        # raw 文件没 frontmatter 存 source_id, 用 DB 反查更准; 这里只能扫.
+        # 调用方应传 vault_root + 用 DB 反查.
+        if p.name == ".tmp" or p.name == ".gitkeep":
+            continue
+        # 用 read_source_file 看 frontmatter 是否有 source_id
+        meta, _ = _read_md(p)
+        if meta.get("source_id") == source_id:
+            return p
+    return None
+
+
+def write_concept_file(
+    vault_root: Path,
+    *,
+    slug: str,
+    title: str,
+    body: str,
+    source_ids: list[str] | None = None,
+    links: list[str] | None = None,
+    certified_at: str | None = None,
+    certified_score: float | None = None,
+    certified_issues: list[str] | None = None,
+    certified_suggestions: list[str] | None = None,
+    version: int = 0,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+    aliases: list[str] | None = None,
+    status: str = "draft",
+    tags: list[str] | None = None,
+) -> Path:
+    """写 wiki/concept/<slug>.md (frontmatter + body), atomic.
+
+    frontmatter 存所有 metadata (slug / title / version / source_ids / links /
+    certified_* / created_at / updated_at / aliases / status / tags).
+    body 是 markdown (LLM 写的 wiki 内容).
+
+    返回写入的 path.
+    """
+    
+    now = updated_at or _utc_now_iso()
+    if created_at is None:
+        created_at = now
+    meta = {
+        "slug": slug,
+        "title": title,
+        "type": "concept",
+        "version": version,
+        "status": status,
+        "source_ids": list(source_ids or []),
+        "links": list(links or []),
+        "aliases": list(aliases or []),
+        "tags": list(tags or []),
+        "created_at": created_at,
+        "updated_at": now,
+    }
+    if certified_at:
+        meta["certified_at"] = certified_at
+        if certified_score is not None:
+            meta["certified_score"] = certified_score
+        if certified_issues:
+            meta["certified_issues"] = list(certified_issues)
+        if certified_suggestions:
+            meta["certified_suggestions"] = list(certified_suggestions)
+    path = _concept_path(vault_root, slug)
+    _write_md(path, meta=meta, body=body)
+    return path
+
+
+def read_concept_file(vault_root: Path, slug: str) -> dict[str, Any] | None:
+    """读 wiki/concept/<slug>.md frontmatter. 不存在返 None."""
+    path = _concept_path(vault_root, slug)
+    if not path.exists():
+        return None
+    meta, body = _read_md(path)
+    meta["_body"] = body
+    meta["_path"] = str(path)
+    return meta
+
+
+def write_source_file(
+    vault_root: Path,
+    *,
+    source_id: str,
+    original_filename: str,
+    content_hash: str,
+    size_bytes: int,
+    status: str = "staged",
+    created_at: str | None = None,
+    body: str = "",
+) -> Path:
+    """写 raw/<file>-ingest-...md frontmatter (raw file 含 source metadata).
+
+    文件名: <original_filename-stem>-ingest-<UTC>.<ext> (跟 ingest 实际路径一致).
+    调用方负责生成 actual raw path (从 source_id 反查).
+
+    body 是原始 markdown (用户提供).
+    """
+    raw_dir = vault_root / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    # 找现有 raw/<file> (按 source_id frontmatter)
+    existing = _raw_path(vault_root, source_id)
+    if existing is not None:
+        path = existing
+    else:
+        # 新建: 用 original_filename
+        from .ids import rename_suffix
+        stem = Path(original_filename).stem
+        suffix = Path(original_filename).suffix
+        path = raw_dir / f"{stem}-{rename_suffix()}{suffix}"
+    now = created_at or _utc_now_iso()
+    meta = {
+        "source_id": source_id,
+        "original_filename": original_filename,
+        "content_hash": content_hash,
+        "size_bytes": size_bytes,
+        "status": status,
+        "created_at": now,
+    }
+    _write_md(path, meta=meta, body=body)
+    return path
+
+
+def read_source_file(path: Path) -> dict[str, Any] | None:
+    """读 raw/<file>-ingest-...md frontmatter."""
+    if not path.exists():
+        return None
+    meta, body = _read_md(path)
+    meta["_body"] = body
+    meta["_path"] = str(path)
+    return meta
 
 
 # ============================================================================

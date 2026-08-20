@@ -12,6 +12,7 @@ license = {text = "MIT OR Apache-2.0"}
 authors = [{name = "corpus contributors"}]
 dependencies = [
     "click>=8.1",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
