@@ -99,7 +99,7 @@ corpus vault info <vault_path> --json
 
 Expect:
 - `db_initialized: true`
-- `schema_version: 2` (auto-migrated from v1 if older DB present)
+- `schema_version: 4`
 - `has_sources: false` (initially)
 - `has_concepts: false` (initially)
 

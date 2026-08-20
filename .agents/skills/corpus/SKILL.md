@@ -29,125 +29,21 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 
 ## Quick Start（agent 视角）
 
-```bash
-# 1. 初始化 vault (一次性, 触发 corpus-init skill)
-#    默认 git init + initial commit, vault 是独立 git 仓库
+按场景路由到子 skill:
 
-# 2. 落源（content-hash dedup，所有 ingest 都加 `-ingest-<UTC compact ISO>` 后缀；软删复活用 --force-revive）
-corpus sources ingest ~/my-wiki ~/notes/postgresql.md
-# 同 hash 已 soft-deleted? 加 --force-revive 复活同一 source_id
-corpus sources ingest --force-revive ~/my-wiki ~/notes/postgresql.md
-# 返回：{"action":"staged","source_id":"d607...","raw_path":"...","size_bytes":187}
+| 想做什么 | 用哪个 skill / 命令 |
+|---|---|
+| 建 vault（第一次 / 新项目） | **`corpus-init`** skill (`.agents/skills/corpus-init/SKILL.md`) |
+| 把 markdown / 文章入库到 vault | **`corpus-ingest`** skill (`.agents/skills/corpus-ingest/SKILL.md`) |
+| 查 / 搜 / 读 / 删 concept | 用本 skill 的 CLI 速查, 直接调 `corpus concepts ...` |
+| 认证 / 评分 concept | 用本 skill 的 `corpus concepts certify` |
+| 看 audit log | 用本 skill 的 `corpus audit` |
+| 改 vault 配置 (git / auto commit 等) | `corpus-config` skill (未来) |
+| 维护 (delete orphan / staleness) | `corpus-maintain` skill (未来) |
 
-# 3. 批量落源
-corpus sources batch ~/my-wiki ~/notes/ --glob "*.md"
+完整 ingest 工作流 (source → LLM 抽 concept → write/update → index sync) 见 **`corpus-ingest`** skill.
+本 skill 是主入口, 包含 路由 + 跨 skill 共享概念 (CAS / dedup / 错误) + CLI 速查.
 
-# 4. 列源
-corpus sources list ~/my-wiki --status staged
-
-# 5. Agent 自己用 LLM 抽 concepts（OpenAI/Anthropic）
-# （用你自己的 API key，不在 corpus 里）
-
-# 6. 写 concept（**必传 --extractions**：每个 source 一段 quote_span 原文证据）
-corpus concepts write ~/my-wiki \
-    --slug postgres-mvcc \
-    --title "PostgreSQL MVCC" \
-    --body "..." \
-    --extractions '[{"source_id":"d607...","quote_span":"Each row carries xmin/xmax..."}]' \
-    --prompt-version extract-v1 \
-    --links postgres-transactions,wal
-
-# 7. 标记源完成
-corpus sources commit ~/my-wiki d607...
-
-# 8. 查 concept
-corpus concepts show ~/my-wiki postgres-mvcc
-
-# 9. 搜索
-corpus concepts search ~/my-wiki "MVCC"
-
-# 10. 质检（agent 自己用 LLM 评分）
-corpus concepts uncertified ~/my-wiki
-corpus concepts certify ~/my-wiki postgres-mvcc --score 0.85 \
-    --issues "缺源" --suggestions "补 WAL 段"
-
-# 11. 看统计
-corpus stats ~/my-wiki
-```
-
-## 标准工作流（agent 编排）
-
-### 模式 A：入库单文件
-
-```
-1. sources ingest vault file.md        → source_id
-2. read source content (Read tool)      → markdown 文本
-3. 🔥 自己用 LLM 抽 concepts
-4. for each concept:
-   - concepts find-by-link vault slug    → dedup 决策依据
-   - concepts write / concepts update
-5. sources commit vault <source_id>
-```
-
-### 模式 A.5 — Multi-agent Read-Modify-Write (CAS)
-
-多 agent 并发改同一 concept 时, 用 `--expected-version` 防覆盖丢失:
-
-```bash
-# 1. read 拿当前 version
-v=$(corpus concepts show $vault $slug --json | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
-
-# 2. LLM merge (读 current + 新内容, 决定新 body)
-
-# 3. submit with CAS
-corpus concepts update $vault $slug --body "<merged>" --expected-version $v
-# 失败 → OptimisticLockError, hint 提示 read_concept again
-# → 回到 1 重新 read + merge
-```
-
-不加 `--expected-version` 是 last-write-wins (快, 但多 agent 场景可能丢数据).
-
-## 模式 B：批量入库 + 整批质检
-
-```
-1. sources batch vault ~/notes/all/      → staged N 个
-2. sources list vault --status staged     → source_id 列表
-3. for each source_id:
-   - concepts show ... 不需要，直接读 vault/raw/<source_id>.md
-   - 🔥 LLM 抽 concepts
-   - concepts find-by-link dedup
-   - concepts write --extractions '[{"source_id":"...","quote_span":"..."}]' \
-     --prompt-version extract-v1
-   - sources commit
-4. concepts uncertified vault            → 待检 list
-5. for each uncertified:
-   - 🔥 自己调 LLM 给 score / issues / suggestions
-   - concepts certify
-6. stats vault                           → 输出报告给用户
-```
-
-### 模式 C：用户查询
-
-```
-1. concepts search vault "用户问题关键词"  → 候选 list
-2. for each candidate:
-   - concepts show vault slug            → 全文 + 反向链接
-3. 整合回答用户
-```
-
-### 模式 D：质检审计（按需）
-
-```
-1. concepts uncertified vault            → 待检 list
-2. for each:
-   - concepts show vault slug            → 看全文
-   - 🔥 LLM 评估：
-     - score: 0.0-1.0
-     - issues: ["缺源 X", "正文偏短"]
-     - suggestions: ["补充 source Y", "加 wikilink Z"]
-   - concepts certify vault slug --score X --issues ... --suggestions ...
-3. stats vault                           → 输出覆盖率
-```
 
 ## dedup 决策启发式
 
@@ -199,35 +95,6 @@ for it in items:
 ```
 
 
-
-## 删 source 的工作流
-
-```bash
-# 1. 先 dry-run 看会 orphan 哪些 concept
-corpus sources delete <vault> <sid>
-
-# 2. 看到 "will orphan: [...]" 评估是否真的删
-# 3. 真的删：
-corpus sources delete <vault> <sid> --yes --reason version-update
-
-# 结果：
-# - sources.status = 'deleted'（软删，physical file 保留）
-# - concept.source_ids 自动移除这个 sid
-# - 如果 concept 因此失去所有 source → 自动 is_orphan=1
-# - agent 后续可以：
-#   - concepts list <vault> --orphans  # 看哪些 concept 变成孤儿
-#   - concepts add-source <vault> <slug> --source-id <new-sid> --quote-span "..."  # 补充 source
-```
-
-## 为什么 write_concept 强制 quote_span
-
-`extractions` 表是 source ↔ concept 的中间表，记录**抽取时刻的元数据 + 原文证据**：
-
-- `quote_span`：原始 markdown 里支撑这个 concept 存在的**具体文字片段**
-- `extracted_at` / `extracted_by` / `prompt_version`：审计与重新抽取的依据
-- `source_content_hash`：防止 source 改后审计失效
-
-不传 quote_span = concept 是"无源之水"——质量认证时无法判断证据、无法追溯历史、无法精准重抽。
 
 ## 不做的事（agent 自己负责）
 

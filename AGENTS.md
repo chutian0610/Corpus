@@ -139,6 +139,14 @@ uv tool install -e .   # editable, 改了 src/ 立即生效
 - **任何改 schema 的 PR 必须附测试**——`tests/test_storage.py` 是覆盖最厚的
 - **不要把 `.wiki-meta/`、`corpus.db` 入 git**——已在 .gitignore
 
+## skill 体系
+
+- **`corpus`** (主入口): 路由表 + 跨 skill 共享概念 (CAS / dedup / 错误) + CLI 速查
+- **`corpus-init`**: vault setup + install 验证 + 强制 git 命令检查
+- **`corpus-ingest`**: 完整 ingest 工作流 (source → LLM 抽 concept → dedup → write/update → index sync), 含 multi-agent 并发要点
+- (未来) `corpus-config`: 改 vault 配置 (auto_git / auto_commit 等)
+- (未来) `corpus-maintain`: 健康检查 (orphan / staleness / duplicates)
+
 ## 未来扩展
 
 - **MCP**：当需要跨 agent 平台或 streaming 时，把 storage.py 的函数包一层 thin CLI wrapper（不需要重写业务逻辑）

@@ -32,7 +32,6 @@ dist/
 *.db-wal
 *.db-shm
 
-.corpus/
 .references/
 .legacy/
 .articles/
