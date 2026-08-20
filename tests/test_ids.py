@@ -1,0 +1,58 @@
+"""ID 与 content-hash 测试。"""
+
+from corpus_bot.ids import (
+    source_id_from_content,
+    slugify,
+    rename_suffix,
+)
+
+
+def test_source_id_stable_for_same_content():
+    a = source_id_from_content("hello world")
+    b = source_id_from_content("hello world")
+    assert a == b
+    assert len(a) == 16  # 16 hex chars
+
+
+def test_source_id_differs_for_different_content():
+    a = source_id_from_content("hello world")
+    b = source_id_from_content("hello world!")
+    assert a != b
+
+
+def test_source_id_handles_unicode():
+    a = source_id_from_content("你好,世界")
+    b = source_id_from_content("你好,世界")
+    assert a == b
+    assert len(a) == 16
+
+
+def test_slugify_basic():
+    assert slugify("PostgreSQL MVCC") == "postgresql-mvcc"
+    assert slugify("Hello World") == "hello-world"
+    assert slugify("  spaces  ") == "spaces"
+
+
+def test_slugify_special_chars():
+    assert slugify("C++ Programming") == "c-programming"
+    assert slugify("Q&A: How?") == "q-a-how"
+    assert slugify("foo/bar baz") == "foo-bar-baz"
+
+
+def test_slugify_truncates_long_titles():
+    long_title = "a" * 200
+    slug = slugify(long_title)
+    assert len(slug) <= 80
+
+
+def test_slugify_empty_fallback():
+    assert slugify("") == "untitled"
+    assert slugify("!!!") == "untitled"
+
+
+def test_rename_suffix_format():
+    s = rename_suffix()
+    parts = s.split("_")
+    assert len(parts) == 2
+    assert parts[0].isdigit()
+    assert len(parts[1]) == 4  # 4 hex

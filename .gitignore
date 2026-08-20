@@ -36,3 +36,12 @@ dist/
 .references/
 .legacy/
 .articles/
+# Codex agent skills (project-local)
+.agents/skills/*/state/
+
+# corpus-bot vault 元数据（如果用户把 vault 放在仓库内）
+.wiki-meta/
+*.corpus.db
+
+# corpus-bot 临时 vault（demo 用）
+/tmp/test-corpus-bot*

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corpus-bot"
+version = "0.2.0"
+description = "LLM-driven wiki builder (CLI-first, skill-friendly, storage layer future-MCP-friendly)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT OR Apache-2.0"}
+authors = [{name = "corpus-bot contributors"}]
+dependencies = [
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+corpus-bot = "corpus_bot.cli:main"
+
+[project.entry-points."agents.skills"]
+corpus-bot = ".agents.skills.corpus_bot:SKILL"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["corpus_bot*"]
+
+[tool.setuptools.package-data]
+corpus_bot = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
