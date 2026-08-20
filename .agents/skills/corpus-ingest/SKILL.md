@@ -130,9 +130,10 @@ elif result[0]["match_score"] >= 0.9:
     action = f"update:{existing_slug}"
 ```
 
-## Step 4 — Write / Update concept
+## Step 4 — Write / Update concept (write_concept 严格 INSERT, update_concept CAS)
 
-**新 concept (write)**:
+**新 concept (write_concept, 严格 INSERT)**:
+
 ```bash
 corpus concepts write <vault> \
   --slug postgresql-mvcc \
@@ -144,7 +145,10 @@ corpus concepts write <vault> \
   --json
 ```
 
-**已有 concept (update with CAS)**: 防 multi-agent 覆盖丢失.
+slug 已存在 → 抛 `ConflictError`. **业务决策 (merge body / 保留哪些 source) 不应 storage 静默做, 由 LLM 决定**. 
+LLM 重新走 dedup 流程: find-by-link + read + merge + update_concept.
+
+**已有 concept (update_concept with CAS)**: 防 multi-agent 覆盖丢失.
 ```bash
 # 1. 读当前 version
 v=$(corpus concepts show <vault> postgresql-mvcc --json | jq .version)
@@ -161,7 +165,7 @@ corpus concepts update <vault> postgresql-mvcc \
 # → 回到 1 重新 read + merge
 ```
 
-**write_concept 也是 idempotent upsert** (schema v3): slug 不存在 → INSERT, 存在 → UPDATE 合并 source_ids. multi-agent 并发不会撞 UNIQUE.
+**multi-agent 并发同 slug race** (schema v3): write_concept 不静默 merge, 第二个等锁后 INSERT 撞 UNIQUE → ConflictError. LLM 重新走 find-by-link + read + merge + update_concept (--expected-version). 这是 read-modify-write 模式的典型应用, 业务决策归属 LLM.
 
 ## Step 5 — Index sync (自动)
 

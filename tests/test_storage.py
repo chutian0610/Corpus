@@ -232,36 +232,26 @@ def test_write_concept_rejects_deleted_source(db: Path, staged_source: str):
         )
 
 
-def test_write_concept_upsert_merges_sources(db: Path, staged_source: str):
-    """write_concept 改 idempotent upsert: 重复 slug 不报错, 合并 source_ids."""
-    res1 = write_concept(
+def test_write_concept_slug_exists_raises_conflict(db: Path, staged_source: str):
+    """write_concept 严格 INSERT: slug 已存在 -> ConflictError (LLM 走 dedup + update).
+
+    业务决策 (merge body / 保留 source) 不应由 storage 静默做, 由 LLM 决定.
+    """
+    from corpus.errors import ConflictError
+    write_concept(
         db, slug="x", title="X v1", body="first",
         extractions_data=[_make_extraction(staged_source)], links=[],
     )
-    assert res1["action"] == "created"
-    assert res1["source_ids"] == [staged_source]
-    # 准备另一个 source 用来测合并
-    from corpus.storage import stage_source
-    s2 = stage_source(
-        db, raw_path=Path("/tmp/raw/other.md"),
-        content="other content", original_filename="other.md",
-    )
-    res2 = write_concept(
-        db, slug="x", title="X v2", body="second",
-        extractions_data=[{"source_id": s2["source_id"], "quote_span": "other content"}],
-        links=[],
-    )
-    assert res2["action"] == "updated"
-    # source_ids 合并: 旧的 + 新的 (sorted)
-    assert sorted(res2["source_ids"]) == sorted([staged_source, s2["source_id"]])
-    # title/body 覆盖
-    info = read_concept(db, "x")
-    assert info["title"] == "X v2"
-    assert info["body"] == "second"
-    # extractions 有 2 行 (audit history)
-    exts = get_concept_evidence_summary(db, "x")
-    total = sum(s["n_extractions"] for s in exts["by_source"])
-    assert total == 2
+    with pytest.raises(ConflictError) as exc:
+        write_concept(
+            db, slug="x", title="X v2", body="second",
+            extractions_data=[_make_extraction(staged_source)], links=[],
+        )
+    assert "already exists" in str(exc.value).lower()
+    # hint 引导 LLM 走 find-by-link + read + update_concept --expected-version
+    assert "find-by-link" in exc.value.hint
+    assert "update_concept" in exc.value.hint
+    assert "expected-version" in exc.value.hint
 
 
 def test_concept_not_orphan_when_source_exists(db: Path, staged_source: str):
@@ -856,69 +846,66 @@ def test_find_concept_by_link_unrelated_filtered(db: Path, staged_source: str):
     assert out == []
 
 
-def test_write_concept_upsert_concurrent_subprocess(tmp_path: Path):
-    """多 agent 并发 write 同一 slug (3 个 subprocess), 都应成功, source_ids 合并."""
+def test_write_concept_concurrent_insert_one_loses(tmp_path: Path):
+    """端到端: 2 agent 并发 write_concept 同 slug, 1 成功 1 ConflictError.
+
+    race 时 storage 报 conflict, LLM 重新 find-by-link + read + merge + update_concept.
+    (不像之前 upsert 静默 merge - 那个会丢用户的业务判断)
+    """
     import subprocess
+    import json as _json
     vault = tmp_path / "vault"
     (vault / "raw").mkdir(parents=True)
-    from corpus.vault import ensure_vault, vault_paths
+    from corpus.vault import ensure_vault
     from corpus.storage import init_db
     ensure_vault(vault)
-    init_db(vault_paths(vault)["corpus_db"])
-
-    # 准备 3 个 source
-    sources = []
-    for i in range(3):
-        p = tmp_path / f"src{i}.md"
-        p.write_text(f"content {i}")
-        sources.append(p)
-
-    import json as _json
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    src = tmp_path / "x.md"
+    src.write_text("x content")
     env = {**os.environ, "PYTHONPATH": "src"}
-    sids = []
-    for p in sources:
-        r = subprocess.run(
-            ["python3", "-m", "corpus", "sources", "ingest", str(vault), str(p), "--json"],
-            cwd="/Users/didi/myprojects/CorpusBot", env=env,
-            capture_output=True, text=True, check=True,
-        )
-        sids.append(_json.loads(r.stdout)["source_id"])
+    sid = _json.loads(subprocess.run(
+        ["python3", "-m", "corpus", "sources", "ingest", str(vault), str(src), "--json"],
+        cwd="/Users/didi/myprojects/CorpusBot", env=env,
+        capture_output=True, text=True, check=True,
+    ).stdout)["source_id"]
 
-    # 3 个 agent 并发 write 同一 slug (不同 title/body/source)
     import threading
     results = {}
-    def worker(name, sid):
+    def worker(name, body):
         r = subprocess.run(
             ["python3", "-m", "corpus", "concepts", "write", str(vault),
-             "--slug", "shared", "--title", f"from-{name}",
-             "--body", f"body from {name}",
-             "--extractions", _json.dumps([{"source_id": sid, "quote_span": f"content {name}"}]),
+             "--slug", "race", "--title", f"from-{name}", "--body", body,
+             "--extractions", _json.dumps([{"source_id": sid, "quote_span": "x"}]),
              "--json"],
             cwd="/Users/didi/myprojects/CorpusBot", env=env,
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=10,
         )
         results[name] = (r.returncode, r.stdout, r.stderr)
 
-    threads = [threading.Thread(target=worker, args=(f"agent-{i}", sids[i])) for i in range(3)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    t_a = threading.Thread(target=worker, args=("A", "body A"))
+    t_b = threading.Thread(target=worker, args=("B", "body B"))
+    t_a.start(); t_b.start()
+    t_a.join(); t_b.join()
 
-    # 3 个都成功
-    for name, (rc, out, err) in sorted(results.items()):
-        assert rc == 0, f"{name} failed: {err[:200]}"
+    # 1 成功 1 ConflictError
+    rc_counts = {"ok": 0, "conflict": 0}
+    for name, (rc, out, err) in results.items():
+        if rc == 0:
+            rc_counts["ok"] += 1
+        else:
+            assert "already exists" in err.lower(), f"{name}: {err[:200]}"
+            assert "find-by-link" in err.lower() or "update_concept" in err.lower(), f"{name}: {err[:200]}"
+            rc_counts["conflict"] += 1
+    assert rc_counts["ok"] == 1, f"期望 1 成功, 实际 {rc_counts}"
+    assert rc_counts["conflict"] == 1, f"期望 1 conflict, 实际 {rc_counts}"
 
-    # 最终 concept 包含 3 个 source
+    # 最终只有 1 个 source (race loser 失败, 没合并)
     from corpus.storage import read_concept
-    info = read_concept(vault / ".wiki-meta" / "corpus.db", "shared")
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "race")
     assert info is not None
-    assert sorted(info["source_ids"]) == sorted(sids), (
-        f"期望 {sorted(sids)}, 实际 {sorted(info['source_ids'])}"
-    )
-    # title/body 是某个 agent 的 (last-writer-wins)
-    assert info["title"].startswith("from-agent-")
+    assert info["source_ids"] == [sid]
 
 
-# ---------- update_concept CAS (optimistic concurrency control) ----------
 
 def test_update_concept_version_starts_at_zero_and_increments(db: Path, staged_source: str):
     from corpus.storage import write_concept, read_concept

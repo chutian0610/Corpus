@@ -787,21 +787,25 @@ def write_concept(
     prompt_version: str | None = None,
     extracted_by: str = "agent",
 ) -> dict[str, Any]:
-    """Idempotent upsert concept: slug 不存在 → INSERT, 存在 → UPDATE 合并 source/links.
+    """严格 INSERT concept. slug 已存在 → ConflictError (LLM 重新走 dedup + update_concept).
+
+    语义边界:
+    - write_concept = '创建新 concept' (insert-only)
+    - update_concept = '修改已有 concept' (CAS via --expected-version)
+    - 撞 slug 不静默 merge: 让 LLM 自己 read + merge, 业务决策不应 storage 层静默做
 
     并发: 整个事务包 BEGIN IMMEDIATE + write_with_retry (SQLITE_BUSY 自动 retry).
-    多 agent 并发写同一 slug:
-      - 第一个拿写锁 → SELECT 不存在 → INSERT
-      - 第二个 wait 后拿写锁 → SELECT 存在 → UPDATE 合并 source_ids/links + 新 extraction
-      - 都成功, 不丢数据
+    多 agent 并发写同一 slug 的 race:
+      - 第一个拿写锁 → SELECT 不存在 → INSERT 成功
+      - 第二个 wait 后拿写锁 → INSERT 撞 UNIQUE → IntegrityError → ConflictError
+      - 第二个 LLM 重新 find-by-link + read + merge + update_concept(--expected-version)
+      - 合并逻辑由 LLM 决定 (它知道怎么 merge body / 保留哪些 source), 不由 storage 静默
 
     必传 extractions_data: 每个 source_id 对应一段 quote_span 证据.
-    - source_ids 从 extractions_data 自动推导, 合并到已有 (不丢)
     - 至少 1 个 extraction
 
     返回: {
-        "concept_id", "slug", "source_ids", "extraction_ids",
-        "action": "created" | "updated"
+        "concept_id", "slug", "source_ids", "extraction_ids"
     }
     """
     if not extractions_data:
@@ -851,9 +855,17 @@ def write_concept(
                 (slug,),
             ).fetchone()
 
-            if existing is None:
-                # INSERT 路径
-                cid = _new_uuid12("c_")
+            if existing is not None:
+                # slug 已存在 → 抛 ConflictError, 让 LLM 走 dedup + update 路径
+                # 业务决策 (merge 哪些内容 / 保留哪些 source) 不应 storage 静默做
+                raise ConflictError(
+                    f"concept slug already exists: {slug!r}",
+                    hint="find-by-link 看候选, read_concept 读现有, LLM merge, "
+                         "然后 update_concept <vault> <slug> --expected-version N (CAS) 提交",
+                )
+            # INSERT 路径
+            cid = _new_uuid12("c_")
+            try:
                 conn.execute(
                     """INSERT INTO concepts
                     (concept_id, slug, title, body, source_ids, links, created_at, updated_at, is_orphan)
@@ -864,26 +876,13 @@ def write_concept(
                         now, now,
                     ),
                 )
-                action = "created"
-            else:
-                # UPDATE 路径: 合并 source_ids + links, 覆盖 title/body
-                cid = existing["concept_id"]
-                old_source_ids = set(_parse_json_list(existing["source_ids"]))
-                old_links = set(_parse_json_list(existing["links"]))
-                merged_source_ids = sorted(set(source_ids) | old_source_ids)
-                merged_links = sorted(set(links) | old_links)
-                conn.execute(
-                    """UPDATE concepts
-                    SET title=?, body=?, source_ids=?, links=?, updated_at=?, is_orphan=0
-                    WHERE slug=?""",
-                    (
-                        title, body,
-                        json.dumps(merged_source_ids),
-                        json.dumps(merged_links),
-                        now, slug,
-                    ),
-                )
-                action = "updated"
+            except sqlite3.IntegrityError as e:
+                # race: 另一 agent 在 SELECT (existing=None) 和 INSERT 之间也 INSERT 了同 slug
+                raise ConflictError(
+                    f"concept slug already exists: {slug!r} (concurrent insert race)",
+                    hint="find-by-link + read_concept + LLM merge, "
+                         "update_concept <vault> <slug> --expected-version N 提交",
+                ) from e
 
             # 3. 写入 extractions (每次调用都写新行, audit history)
             for ed in extractions_data:
@@ -927,7 +926,6 @@ def write_concept(
         "slug": slug,
         "source_ids": final_source_ids,
         "extraction_ids": extraction_ids,
-        "action": action,
     }
 
 

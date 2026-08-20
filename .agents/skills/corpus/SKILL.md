@@ -73,6 +73,7 @@ error: <message>
 - `link not slug-safe` → links 必须是合法 slug (小写字母数字+连字符)
 - `extraction not found` → `concepts remove-extraction` 的 id 不存在
 - `concept ... was modified concurrently` → multi-agent CAS 失败 (--expected-version 不匹配), hint 提示 read_concept 重新 read + merge
+- `concept slug already exists` (write_concept) → LLM 重新 find-by-link + read + merge + update_concept (--expected-version). 业务决策不在 storage 静默做.
 - `no fields to update` → `concepts certify` 至少传一个 `--score / --issues / --suggestions`
 - `score is required for first-time certification` → 首次认证必传 `--score` (后续 partial update 可省)
 - `path is inside vault raw/` → `sources ingest` 不接受 vault 内文件. raw/ 是 ingest 产物目录, 想重新入库同一文件先 `sources delete <sid>`

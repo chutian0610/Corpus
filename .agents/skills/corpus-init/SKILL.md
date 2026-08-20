@@ -107,25 +107,14 @@ Expect:
 
 ```
 <vault_path>/
-├── raw/                   # ingest 产物 (自动 rename <stem>-ingest-<UTC compact ISO>.<ext>)
+├── .gitignore             # git igore 文件
+├── raw/                   # ingest 产物
 ├── wiki/
 │   ├── concept/           # corpus concepts write 生成的 wiki 页 (<slug>.md)
 │   └── index/             # 自动 export_index: concepts.json + sources.json
 └── .wiki-meta/
-    └── corpus.db          # SQLite (sources / concepts / extractions / links /
-                           # cooccurrence / certification_log)
-                           # ⚠️ 不要入 git (含本地 SQLite, 已在 .gitignore)
+    └── corpus.db          # SQLite
 ```
-
-## Common mistakes
-
-| Mistake | Symptom | Fix |
-|---|---|---|
-| Init in vault that already has data | (no-op, idempotent — but doesn't reset) | `corpus concepts delete` / `sources delete` for cleanup |
-| Trying `sources ingest` with file inside vault | `path is inside vault raw/` | Use external path; `raw/` is ingest product dir |
-| `.wiki-meta/` checked into git | repo size bloat, conflicts on local SQLite | Add `.wiki-meta/` to `.gitignore` |
-| Old install conflicts (`corpus-bot` + `corpus` packages) | `which corpus` → `corpus-bot` binary still installed | `uv tool uninstall corpus-bot && uv tool install -e . --force` |
-| Schema version mismatch | `db_initialized: true` but `schema_version: 1` | Re-run `corpus vault init <path>` (auto-migrates v1→v2) |
 
 ## Next steps
 
