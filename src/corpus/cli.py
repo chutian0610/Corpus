@@ -54,7 +54,8 @@ from .vault import (
     validate_source_path_basic,
     vault_paths,
 )
-from .lock import vault_file_lock
+from .atomic import atomic_write_text
+from .lock import vault_file_lock  # utility (CLI 默认不用)
 
 
 # ---------- helpers ----------
@@ -113,19 +114,6 @@ def _resolve_db(vault_root: Path, *, ensure_vault_dir: bool = True):
     paths = vault_paths(vault_root)
     if not is_initialized(paths["corpus_db"]):
         init_db(paths["corpus_db"])
-    return paths
-
-
-def _resolve_db_with_lock(vault_root: Path, *, ensure_vault_dir: bool = True):
-    """解析 vault 路径 + 拿 exclusive 锁 (写命令用).
-
-    返回 paths 时锁仍持有. 调用方应保持引用, 函数返回时锁自动释放.
-    pattern:
-        paths = _resolve_db_with_lock(vault_path)  # 拿锁
-        ...  # 所有 IO 操作在锁保护下
-    """
-    paths = _resolve_db(vault_root, ensure_vault_dir=ensure_vault_dir)
-    vault_file_lock(paths["root"], exclusive=True).__enter__()
     return paths
 
 
@@ -280,7 +268,7 @@ def sources_ingest(vault_path: Path, source_file: Path, force_revive: bool, as_j
       deleted + --force-revive -> 复用 source_id, status='staged', 刷新 raw_path/content_hash
       deleted 不带 flag -> ConflictError, hint 提示 --force-revive
     """
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
 
     # Rule 1-5 基础校验 (symlink / 扩展名 / 大小 / 存在性)
     try:
@@ -340,7 +328,7 @@ def sources_batch(
     --force-revive: 同 hash 已 deleted -> 复活该 source.
     """
     from .errors import ValidationError
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
 
     matches = list(source_dir.rglob(glob_pattern) if recursive else source_dir.glob(glob_pattern))
     if not matches:
@@ -429,7 +417,7 @@ def sources_show(vault_path: Path, source_id: str, as_json: bool) -> None:
 @click.option("--json", "as_json", is_flag=True)
 def sources_commit(vault_path: Path, source_id: str, as_json: bool) -> None:
     """标记 source 为 committed（agent 完成 extract+write_concept 后调用）。"""
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     try:
         result = commit_source(paths["corpus_db"], source_id)
     except Exception as e:
@@ -449,7 +437,7 @@ def sources_delete(vault_path: Path, source_id: str, yes: bool, dry_run: bool, r
 
     默认先 dry-run 看 impact；--yes 跳过 dry-run 直接执行。
     """
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     # 显示 dry-run preview（除非已经 --yes 强制执行）
     if not yes:
         try:
@@ -497,7 +485,7 @@ def cli_index(subcmd: str, vault_path: Path, as_json: bool) -> None:
     """
     if subcmd != "sync":
         _err(f"unknown subcmd: {subcmd}")
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     try:
         result = export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
@@ -551,7 +539,7 @@ def concepts_write(
         wiki_path = paths["wiki_concept"] / f"{slug}.md"
         frontmatter = f"---\nslug: {slug}\ntitle: {title}\n---\n\n"
         try:
-            wiki_path.write_text(frontmatter + body, encoding="utf-8")
+            atomic_write_text(wiki_path, frontmatter + body, encoding="utf-8")
         except OSError as e:
             delete_concept(paths["corpus_db"], slug)
             _err(
@@ -598,7 +586,7 @@ def concepts_update(
 
     link_list = [s.strip() for s in add_links.split(",") if s.strip()] if add_links else None
 
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     try:
         result = update_concept(
             paths["corpus_db"],
@@ -619,7 +607,7 @@ def concepts_update(
             new_title = title if title is not None else current.get("title", slug)
             frontmatter = f"---\nslug: {slug}\ntitle: {new_title}\n---\n\n"
             try:
-                wiki_path.write_text(frontmatter + new_body, encoding="utf-8")
+                atomic_write_text(wiki_path, frontmatter + new_body, encoding="utf-8")
             except OSError as e:
                 _err(
                     f"failed to write wiki file {wiki_path}: {e}",
@@ -643,7 +631,7 @@ def concepts_delete(vault_path: Path, slug: str, dry_run: bool, as_json: bool) -
 
     是 user-level 决策, 没二次确认 flag; dry-run 默认开, 看清再 --no-dry-run.
     """
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     from .storage import read_concept
     info = read_concept(paths["corpus_db"], slug)
     if not info:
@@ -764,7 +752,7 @@ def concepts_certify(
 
     首次认证必须传 --score.
     """
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     issue_list: list[str] | None = None
     if issues is not None:
         issue_list = [s.strip() for s in issues.split(",")]
@@ -788,7 +776,7 @@ def concepts_certify(
 @click.argument("slug")
 @click.option("--json", "as_json", is_flag=True)
 def concepts_unmark(vault_path: Path, slug: str, as_json: bool) -> None:
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     try:
         result = unmark_certified(paths["corpus_db"], slug)
     except Exception as e:
@@ -824,7 +812,7 @@ def concepts_evidence(vault_path: Path, slug: str, source_id: str | None, as_jso
 @click.option("--json", "as_json", is_flag=True)
 def concepts_add_source(vault_path: Path, slug: str, source_id: str, quote_span: str, prompt_version: str | None, as_json: bool) -> None:
     """给 concept 加一个 source（自动写 extractions + 清 is_orphan）。"""
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     try:
         result = add_source_to_concept(
             paths["corpus_db"], slug, source_id,
@@ -849,7 +837,7 @@ def concepts_remove_extraction(vault_path: Path, extraction_id: str, as_json: bo
     sync 语义: 删的是该 sid 的最后一条 extraction → 从 concept.source_ids 移除,
     并按需 is_orphan=1.
     """
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     try:
         result = remove_extraction(paths["corpus_db"], extraction_id)
         export_index(paths["corpus_db"], paths["wiki_index"])
@@ -865,7 +853,7 @@ def concepts_remove_extraction(vault_path: Path, extraction_id: str, as_json: bo
 @click.option("--json", "as_json", is_flag=True)
 def concepts_remove_source(vault_path: Path, slug: str, source_id: str, as_json: bool) -> None:
     """从 concept.source_ids 移除一个 source（自动更新 is_orphan）。"""
-    paths = _resolve_db_with_lock(vault_path)
+    paths = _resolve_db(vault_path)
     try:
         result = remove_source_from_concept(paths["corpus_db"], slug, source_id)
         export_index(paths["corpus_db"], paths["wiki_index"])

@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .atomic import atomic_write_text
 from .errors import ConflictError, StorageError
 
 SCHEMA_VERSION = 2
@@ -181,11 +182,15 @@ def _hash(content: bytes) -> str:
 
 
 @contextmanager
-def connect(db_path: Path, *, busy_timeout_ms: int = 5000) -> Iterator[sqlite3.Connection]:
+def connect(db_path: Path, *, busy_timeout_ms: int = 30000) -> Iterator[sqlite3.Connection]:
     """打开 SQLite 连接: WAL + autocommit + busy_timeout.
 
-    并发: WAL (一个写者 + 多读者) + busy_timeout=5000ms. SQLite 内部序列化写.
-    物理文件 IO (raw/ wiki/) 由 corpus.lock.vault_file_lock 跨进程保护.
+    并发模型 (无 flock 强制锁):
+    - WAL: 一个写者 + 多读者, reader 不阻塞 writer
+    - busy_timeout=30s: 多 writer 等 SQLite 文件锁排队 (POSIX advisory lock on WAL/SHM)
+    - autocommit: 每语句独立事务, 无嵌套锁
+
+    物理文件 IO (raw/ wiki/) 由 corpus.atomic.atomic_write_text 保护 (写 tmp + os.replace).
     """
     if not db_path.parent.exists():
         raise StorageError(f"meta directory missing: {db_path.parent}")
@@ -195,7 +200,7 @@ def connect(db_path: Path, *, busy_timeout_ms: int = 5000) -> Iterator[sqlite3.C
         timeout=busy_timeout_ms / 1000.0,
     )
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")  # WAL 模式下推荐
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     conn.row_factory = sqlite3.Row
@@ -203,6 +208,48 @@ def connect(db_path: Path, *, busy_timeout_ms: int = 5000) -> Iterator[sqlite3.C
         yield conn
     finally:
         conn.close()
+
+
+# SQLite 错误码
+_SQLITE_BUSY = 5        # database is locked
+_SQLITE_LOCKED = 6      # table is locked
+
+
+def _is_busy_error(exc: sqlite3.OperationalError) -> bool:
+    """判断是否是 SQLITE_BUSY / SQLITE_LOCKED."""
+    msg = str(exc).lower()
+    return "database is locked" in msg or "table is locked" in msg or "locked" in msg and "database" in msg
+
+
+@contextmanager
+def write_with_retry(db_path: Path, *, max_retries: int = 5, backoff_ms: int = 50):
+    """带 retry 的写 context manager: SQLITE_BUSY 自动重试.
+
+    多个 CLI 并发写同一 vault 时, SQLite 自动串行化 (writer 等锁).
+    若等锁超时 (busy_timeout=30s), 抛 SQLITE_BUSY → 我们 retry max_retries 次, 每次 backoff.
+
+    实际生产中: busy_timeout=30s 期间大概率拿到锁, retry 通常不触发.
+    但 retry 给边缘 case (timeout 刚到 / 多个 writer) 兜底.
+    """
+    import sqlite3
+    import time
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            with connect(db_path) as conn:
+                yield conn
+            return  # 成功, 退出
+        except sqlite3.OperationalError as e:
+            if not _is_busy_error(e):
+                raise
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(backoff_ms / 1000.0 * (attempt + 1))  # 线性 backoff
+                continue
+            raise StorageError(
+                f"vault locked after {max_retries + 1} attempts: {e}",
+                hint="another corpus process is writing; retry in a moment",
+            ) from e
 
 
 def init_db(db_path: Path) -> None:

@@ -1,4 +1,9 @@
-"""corpus.lock 跨进程文件锁测试."""
+"""corpus.atomic + SQLite WAL 并发安全测试.
+
+flock 文件锁已移除 (Phase 1.5 重构): 多 agent 并行 ingest 靠 SQLite WAL +
+atomic_write_text. 此文件保留 vault_file_lock utility (corpus.lock) 给可选 advisory lock.
+"""
+import json
 import os
 import sys
 import threading
@@ -62,55 +67,58 @@ def test_is_locked_detects_holder(vault: Path):
         assert is_locked(vault) is True
 
 
-def test_cli_concurrent_writes_second_fails(tmp_path: Path):
-    """两个 corpus sources ingest 进程并发, 第二个必须立刻失败 (exit 1).
+def test_cli_concurrent_writes_all_succeed(tmp_path: Path):
+    """多 agent 并行 ingest 不同 source, 都应成功 (SQLite WAL + atomic write).
 
-    验证场景: 一个进程持 flock sleep, 另一个进程尝试 ingest.
+    无 flock 强制锁: SQLite WAL 串行化 DB 写, atomic_write_text 防 raw/ 文件 race.
     """
     import subprocess
     vault = tmp_path / "v"
     raw = vault / "raw"
     raw.mkdir(parents=True)
-    # init vault
     env = {**os.environ, "PYTHONPATH": "src"}
     subprocess.run(
         ["python3", "-m", "corpus", "vault", "init", str(vault), "--json"],
         cwd="/Users/didi/myprojects/CorpusBot", env=env,
         check=True, capture_output=True,
     )
-    src = tmp_path / "x.md"
-    src.write_text("# x\ncontent")
 
-    # holder: 拿 flock + sleep 2s
-    holder_script = (
-        "import sys, os, time, fcntl\n"
-        f"sys.path.insert(0, '/Users/didi/myprojects/CorpusBot/src')\n"
-        "from pathlib import Path\n"
-        f"vault = Path('{vault}')\n"
-        "lock = vault / '.wiki-meta' / '.lock'\n"
-        "fd = os.open(str(lock), os.O_CREAT | os.O_RDWR)\n"
-        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
-        "os.write(fd, str(os.getpid()).encode())\n"
-        "time.sleep(2)\n"
-        "fcntl.flock(fd, fcntl.LOCK_UN)\n"
-        "os.close(fd)\n"
-    )
-    proc_holder = subprocess.Popen(
-        ["python3", "-c", holder_script],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    # 等 holder 拿锁
-    time.sleep(0.3)
+    # 5 个不同 source, 并行 ingest
+    sources = []
+    for i in range(5):
+        p = tmp_path / f"s{i}.md"
+        p.write_text(f"# source {i}\ncontent {i}")
+        sources.append(p)
 
-    # 启动 ingest (此时 vault 被锁)
-    proc_ing = subprocess.run(
-        ["python3", "-m", "corpus", "sources", "ingest", str(vault), str(src), "--json"],
-        cwd="/Users/didi/myprojects/CorpusBot", env=env,
-        capture_output=True, text=True, timeout=10,
-    )
-    proc_holder.wait(timeout=10)
+    results = {}
+    import threading
+    def worker(name, src):
+        r = subprocess.run(
+            ["python3", "-m", "corpus", "sources", "ingest", str(vault), str(src), "--json"],
+            cwd="/Users/didi/myprojects/CorpusBot", env=env,
+            capture_output=True, text=True, timeout=15,
+        )
+        results[name] = (r.returncode, r.stdout, r.stderr)
 
-    assert proc_ing.returncode == 1, f"ingest 应该失败, got rc={proc_ing.returncode}"
-    assert "locked by another process" in proc_ing.stderr.lower()
-    # holder pid 应该出现在错误里
-    assert str(proc_holder.pid) in proc_ing.stderr
+    threads = [threading.Thread(target=worker, args=(f"agent-{i}", s)) for i, s in enumerate(sources)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    # 所有 ingest 应成功 (无 flock 阻塞, 无 SQLITE_BUSY 超时)
+    for name, (rc, out, err) in sorted(results.items()):
+        assert rc == 0, f"{name} failed rc={rc}: {err[:200]}"
+
+    # 所有 source 都入库了
+    src_list = subprocess.run(
+        ["python3", "-m", "corpus", "sources", "list", str(vault), "--json"],
+        cwd="/Users/didi/myprojects/CorpusBot", env=env, capture_output=True, text=True,
+    )
+    items = json.loads(src_list.stdout)
+    assert len(items) == 5, f"期望 5 sources, 实际 {len(items)}"
+
+    # raw/ 下 5 个文件都 atomic write 完成 (无半写)
+    raw_files = sorted(p.name for p in (vault / "raw").iterdir() if p.name not in (".tmp", ".gitkeep"))
+    assert len(raw_files) == 5, f"期望 5 个 raw 文件, 实际 {len(raw_files)}: {raw_files}"
+    # 每个文件 size > 0
+    for f in raw_files:
+        assert (vault / "raw" / f).stat().st_size > 0
