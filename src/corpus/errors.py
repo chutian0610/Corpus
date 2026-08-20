@@ -39,3 +39,15 @@ class ConflictError(CorpusBotError):
 
 class StorageError(CorpusBotError):
     """SQLite/文件系统层错误。"""
+
+
+class OptimisticLockError(ConflictError):
+    """乐观锁冲突: 并发 update 时 expected_updated_at 不匹配.
+
+    agent 端 read-modify-write 工作流:
+      1. read_concept 拿 current.updated_at
+      2. 决定修改 (LLM merge / 业务逻辑)
+      3. update_concept(expected_updated_at=current.updated_at, ...) 提交
+      4. 抛 OptimisticLockError -> 回 1 重新 read + merge (中间被另一 agent 改了)
+    """
+

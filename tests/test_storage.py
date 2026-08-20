@@ -485,8 +485,8 @@ def test_stage_source_active_duplicate_still_rejected(db: Path):
 
 # ---------- init_db migration v1 -> v2 ----------
 
-def test_init_db_upgrades_v1_to_v2(tmp_path: Path):
-    """模拟老库 (v1 DDL 含 UNIQUE(content_hash)) → init_db 应无错升级到 v2."""
+def test_init_db_upgrades_v1_to_v3(tmp_path: Path):
+    """模拟老库 (v1 DDL) → init_db 升级到 v3 (经过 v2 + v3 migration)."""
     import sqlite3
 
     db_path = tmp_path / "legacy.db"
@@ -532,7 +532,7 @@ def test_init_db_upgrades_v1_to_v2(tmp_path: Path):
         rows = c.execute("SELECT * FROM sources").fetchall()
         assert len(rows) == 2
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver["value"]) == 2
+        assert int(ver["value"]) == 3
         # 索引存在
         idx = c.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sources_content_hash'"
@@ -540,16 +540,16 @@ def test_init_db_upgrades_v1_to_v2(tmp_path: Path):
         assert idx is not None
 
 
-def test_init_db_idempotent_on_v2(tmp_path: Path):
-    """已 v2 的库 init_db 多次也幂等, version 不漂."""
-    db_path = tmp_path / "v2.db"
+def test_init_db_idempotent_on_v3(tmp_path: Path):
+    """已 v3 的库 init_db 多次也幂等, version 不漂."""
+    db_path = tmp_path / "v3.db"
     init_db(db_path)
     init_db(db_path)
     init_db(db_path)
     import sqlite3
     with sqlite3.connect(str(db_path)) as c:
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver[0]) == 2
+        assert int(ver[0]) == 3
 
 
 # ---------- delete_concept ----------
@@ -916,3 +916,124 @@ def test_write_concept_upsert_concurrent_subprocess(tmp_path: Path):
     )
     # title/body 是某个 agent 的 (last-writer-wins)
     assert info["title"].startswith("from-agent-")
+
+
+# ---------- update_concept CAS (optimistic concurrency control) ----------
+
+def test_update_concept_version_starts_at_zero_and_increments(db: Path, staged_source: str):
+    from corpus.storage import write_concept, read_concept
+    res = write_concept(
+        db, slug="cas", title="t", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    # write_concept 后 version 应为 1 (或 0? 取决于是否 +1)
+    info = read_concept(db, "cas")
+    assert "version" in info
+    # write_concept 是 INSERT, version 保持 0 (不变); update_concept 才 +1
+    assert info["version"] == 0
+
+
+def test_update_concept_no_expected_version_succeeds(db: Path, staged_source: str):
+    """不传 expected_version = last-write-wins 行为 (向后兼容)."""
+    from corpus.storage import write_concept, update_concept, read_concept
+    write_concept(
+        db, slug="cas2", title="v1", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    res = update_concept(db, slug="cas2", body="v2 body")
+    assert res["version"] == 1  # +1 from 0
+    assert read_concept(db, "cas2")["body"] == "v2 body"
+
+
+def test_update_concept_cas_matching_succeeds(db: Path, staged_source: str):
+    from corpus.storage import write_concept, update_concept, read_concept
+    write_concept(
+        db, slug="cas3", title="t", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    # 读 version, 传 expected_version=0 匹配 → 应成功
+    info = read_concept(db, "cas3")
+    res = update_concept(db, slug="cas3", body="new", expected_version=info["version"])
+    assert res["version"] == 1
+    assert read_concept(db, "cas3")["body"] == "new"
+
+
+def test_update_concept_cas_mismatch_raises(db: Path, staged_source: str):
+    """CAS 失败: 另一 agent 已经 update 过, expected_version 不匹配 → OptimisticLockError."""
+    from corpus.errors import OptimisticLockError
+    from corpus.storage import write_concept, update_concept, read_concept
+    write_concept(
+        db, slug="cas4", title="t", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    info = read_concept(db, "cas4")
+    # 模拟另一 agent 先 update
+    update_concept(db, slug="cas4", body="other agent's body")
+    # 现在原 agent 用 stale expected_version (0) 再 update → CAS fail
+    with pytest.raises(OptimisticLockError) as exc:
+        update_concept(db, slug="cas4", body="my body", expected_version=info["version"])
+    assert "concurrently" in str(exc.value).lower()
+    # hint 提示重新 read
+    assert "read_concept" in (exc.value.hint or "")
+
+
+def test_update_concept_cas_concurrent_subprocess(tmp_path: Path):
+    """端到端: 2 agent 同时 update 同一 concept, 第二个 CAS fail."""
+    import subprocess, json
+    vault = tmp_path / "vault"
+    (vault / "raw").mkdir(parents=True)
+    from corpus.vault import ensure_vault
+    from corpus.storage import init_db
+    ensure_vault(vault)
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    src = tmp_path / "x.md"
+    src.write_text("x content")
+    env = {**os.environ, "PYTHONPATH": "src"}
+    sid = json.loads(subprocess.run(
+        ["python3", "-m", "corpus", "sources", "ingest", str(vault), str(src), "--json"],
+        cwd="/Users/didi/myprojects/CorpusBot", env=env, capture_output=True, text=True, check=True,
+    ).stdout)["source_id"]
+    # write concept
+    subprocess.run(
+        ["python3", "-m", "corpus", "concepts", "write", str(vault),
+         "--slug", "race", "--title", "t", "--body", "init",
+         "--extractions", json.dumps([{"source_id": sid, "quote_span": "x content"}]),
+         "--json"],
+        cwd="/Users/didi/myprojects/CorpusBot", env=env,
+        capture_output=True, text=True, check=True,
+    )
+    # 读 version
+    show = json.loads(subprocess.run(
+        ["python3", "-m", "corpus", "concepts", "show", str(vault), "race", "--json"],
+        cwd="/Users/didi/myprojects/CorpusBot", env=env, capture_output=True, text=True, check=True,
+    ).stdout)
+    v = show["version"]
+
+    # agent A 用 v 调 update (成功, version+1)
+    # agent B 同时用 v 调 update (CAS fail, OptimisticLockError)
+    import threading
+    results = {}
+    def worker(name, body):
+        r = subprocess.run(
+            ["python3", "-m", "corpus", "concepts", "update", str(vault), "race",
+             "--body", body, "--expected-version", str(v), "--json"],
+            cwd="/Users/didi/myprojects/CorpusBot", env=env,
+            capture_output=True, text=True, timeout=10,
+        )
+        results[name] = (r.returncode, r.stdout, r.stderr)
+
+    t_a = threading.Thread(target=worker, args=("A", "agent A body"))
+    t_b = threading.Thread(target=worker, args=("B", "agent B body"))
+    t_a.start(); t_b.start()
+    t_a.join(); t_b.join()
+
+    # 恰好 1 成功 1 CAS fail
+    rc_counts = {}
+    for name, (rc, out, err) in results.items():
+        if rc == 0:
+            rc_counts["ok"] = rc_counts.get("ok", 0) + 1
+        else:
+            assert "concurrently" in err.lower(), f"{name} err: {err}"
+            rc_counts["cas_fail"] = rc_counts.get("cas_fail", 0) + 1
+    assert rc_counts.get("ok") == 1, f"期望 1 成功, 实际 {rc_counts}"
+    assert rc_counts.get("cas_fail") == 1, f"期望 1 CAS fail, 实际 {rc_counts}"

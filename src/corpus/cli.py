@@ -563,17 +563,28 @@ def concepts_write(
               help='JSON array: [{"source_id":"...","quote_span":"..."}, ...] (增量加 extractions, 必填 quote_span)')
 @click.option("--add-links", "add_links", default="", help="逗号分隔 wikilink slugs (slug-safe, 拒绝自引用)")
 @click.option("--prompt-version", default=None)
+@click.option("--expected-version", type=int, default=None,
+              help="CAS: 只在 concept 当前 version 等于此值时 update, 否则 OptimisticLockError. "
+                   "agent read-modify-write 模式必传 (防 multi-agent 覆盖丢失).")
 @click.option("--json", "as_json", is_flag=True)
 def concepts_update(
     vault_path: Path, slug: str,
     title: str | None, body: str | None,
     add_extractions_json: str | None, add_links: str,
-    prompt_version: str | None, as_json: bool,
+    prompt_version: str | None, expected_version: int | None,
+    as_json: bool,
 ) -> None:
     """增量更新 concept: 改 title/body, 加 extractions, 加 wikilinks.
 
     仅做增量 (与 write_concept 不同, 没有"全量覆盖 extractions"接口).
     想重写 evidence 请用 `concepts write` 不同的 slug, 或先 `delete` 再 `write`.
+
+    --expected-version: 乐观锁 CAS 标记. agent read-modify-write 工作流:
+      1. read_concept 拿 current.version
+      2. LLM merge 决定新 body/extractions
+      3. update_concept --expected-version=<current.version> 提交
+      4. 抛 OptimisticLockError -> 回 1 重新 read + merge
+    不传 = last-write-wins (快但多 agent 场景可能丢数据).
     """
     add_extractions = None
     if add_extractions_json:
@@ -596,6 +607,7 @@ def concepts_update(
             add_extractions=add_extractions,
             add_links=link_list,
             prompt_version=prompt_version,
+            expected_version=expected_version,
         )
         # 物理写文件 (body 改了时)
         if body is not None or title is not None:

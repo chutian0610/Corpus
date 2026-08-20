@@ -89,7 +89,25 @@ corpus stats ~/my-wiki
 5. sources commit vault <source_id>
 ```
 
-### 模式 B：批量入库 + 整批质检
+### 模式 A.5 — Multi-agent Read-Modify-Write (CAS)
+
+多 agent 并发改同一 concept 时, 用 `--expected-version` 防覆盖丢失:
+
+```bash
+# 1. read 拿当前 version
+v=$(corpus concepts show $vault $slug --json | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+
+# 2. LLM merge (读 current + 新内容, 决定新 body)
+
+# 3. submit with CAS
+corpus concepts update $vault $slug --body "<merged>" --expected-version $v
+# 失败 → OptimisticLockError, hint 提示 read_concept again
+# → 回到 1 重新 read + merge
+```
+
+不加 `--expected-version` 是 last-write-wins (快, 但多 agent 场景可能丢数据).
+
+## 模式 B：批量入库 + 整批质检
 
 ```
 1. sources batch vault ~/notes/all/      → staged N 个
@@ -158,6 +176,7 @@ error: <message>
 - `link cannot be self-reference` → concept 不能 wikilink 自己
 - `link not slug-safe` → links 必须是合法 slug (小写字母数字+连字符)
 - `extraction not found` → `concepts remove-extraction` 的 id 不存在
+- `concept ... was modified concurrently` → multi-agent CAS 失败 (--expected-version 不匹配), hint 提示 read_concept 重新 read + merge
 - `no fields to update` → `concepts certify` 至少传一个 `--score / --issues / --suggestions`
 - `score is required for first-time certification` → 首次认证必传 `--score` (后续 partial update 可省)
 - `path is inside vault raw/` → `sources ingest` 不接受 vault 内文件. raw/ 是 ingest 产物目录, 想重新入库同一文件先 `sources delete <sid>`
@@ -228,6 +247,7 @@ corpus sources delete <vault> <sid> --yes --reason version-update
 | `sources ingest ... --force-revive` | 同 hash 已 soft-deleted → 复活该 source_id |
 | `concepts write <vault> ...` | 写 concept (必传 --extractions, 每个 source 一段 quote_span) |
 | `concepts update <vault> <slug> --body ... --add-extractions ...` | 增量更新 (改 title/body + 加 extraction/link) |
+| `concepts update <vault> <slug> --expected-version N ...` | CAS 模式: 只在 concept 当前 version=N 时 update, 否则 OptimisticLockError. **multi-agent 推荐必传**. |
 | `concepts delete <vault> <slug>` | 删 concept (默认 dry-run, --no-dry-run 真删, 同步清 wiki 文件) |
 | `concepts list ... --orphans` / `--certified` / `--uncertified` | 过滤 (--certified 与 --uncertified 互斥) |
 | `concepts remove-extraction <vault> <extraction_id>` | 细粒度撤一次抽取 (自动 sync concept.source_ids / is_orphan) |

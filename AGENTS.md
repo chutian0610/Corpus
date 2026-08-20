@@ -118,6 +118,7 @@ uv tool install -e .    # 推荐 (隔离)
 - `links` 校验：`write_concept` / `update_concept` 都拒绝自引用 + 非 slug-safe 字符串 (用 `slugify()` 反向检查)
 - `remove_extraction(extraction_id)`: 细粒度撤一次抽取 — 删 extractions 行 + sync concept.source_ids (该 sid 无其它抽取时移除), 按需 `is_orphan=1`. 与 `remove_source_from_concept` (粗粒度) 互为补充
 - `mark_certified` partial update: `score / issues / suggestions` 都可选. `None` = 保留旧值; 传 list (含 `[]`) = 覆盖; 至少一个非 None 必传. 首次认证必传 `score` (旧值是 None)
+- `concepts` 表加 `version` 字段 (optimistic concurrency control, schema v3): 每次 update_concept / write_concept 后 +1. agent 端 read-modify-write 用 `--expected-version` (CLI) / `expected_version` (storage), 不匹配抛 OptimisticLockError 让 agent 重新 read + merge (防 multi-agent 覆盖丢失)
 - `find_concept_by_link` 加 `match_score` (1.0 exact / 0.9 startswith / 0.5 contains / 0.4 title), 完全不相关过滤掉, 按 score DESC + slug 长度 ASC 排序
 - `mark_certified` 用 microsecond 精度时间戳 (`_utc_now_iso()` 是 seconds 精度, 同秒两次认证会撞 `certification_log` 的 (concept_id, certified_at) PK)
 - 同一 (source, concept) 可多次抽取，每次都记 extractions 一行（audit history）

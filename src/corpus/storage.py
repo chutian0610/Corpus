@@ -33,11 +33,12 @@ from typing import Any, Iterator
 from .atomic import atomic_write_text
 from .errors import ConflictError, StorageError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Migration 步骤表: key=(from_v, to_v), value=函数(conn)
 _MIGRATIONS: dict[tuple[int, int], str] = {
     (1, 2): "_migrate_1_to_2",
+    (2, 3): "_migrate_2_to_3",
 }
 
 def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
@@ -72,6 +73,53 @@ def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_2_to_3(conn: sqlite3.Connection) -> None:
+    """v2 → v3: concepts 表加 version INTEGER NOT NULL DEFAULT 0 (optimistic concurrency control).
+
+    SQLite 没有 ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT (没值), 标准做法是 rename + recreate.
+    现有 concept 的 version 默认 0 (从未 update 过).
+    """
+    conn.executescript(
+        """
+        ALTER TABLE concepts RENAME TO concepts__v2;
+        CREATE TABLE concepts (
+            concept_id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            source_ids TEXT NOT NULL DEFAULT '[]',
+            links TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            is_orphan INTEGER NOT NULL DEFAULT 0,
+            version INTEGER NOT NULL DEFAULT 0,
+            certified_at TEXT,
+            certified_score REAL,
+            certified_issues TEXT,
+            certified_suggestions TEXT,
+            certified_by TEXT
+        );
+        INSERT INTO concepts
+            (concept_id, slug, title, body, source_ids, links,
+             created_at, updated_at, is_orphan, version,
+             certified_at, certified_score, certified_issues,
+             certified_suggestions, certified_by)
+            SELECT concept_id, slug, title, body, source_ids, links,
+                   created_at, updated_at, is_orphan, 0,
+                   certified_at, certified_score, certified_issues,
+                   certified_suggestions, certified_by
+            FROM concepts__v2;
+        DROP TABLE concepts__v2;
+        CREATE INDEX IF NOT EXISTS idx_concepts_slug ON concepts(slug);
+        CREATE INDEX IF NOT EXISTS idx_concepts_certified_at ON concepts(certified_at);
+        CREATE INDEX IF NOT EXISTS idx_concepts_is_orphan ON concepts(is_orphan);
+        """
+    )
+
+
+
+
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
     source_id TEXT PRIMARY KEY,
@@ -101,6 +149,7 @@ CREATE TABLE IF NOT EXISTS concepts (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     is_orphan INTEGER NOT NULL DEFAULT 0,    -- 1 = source_ids 为空
+    version INTEGER NOT NULL DEFAULT 0,      -- 乐观锁: 每次 update +1, CAS 用来 detect concurrent modification
     -- certification fields
     certified_at TEXT,
     certified_score REAL,
@@ -777,121 +826,150 @@ def update_concept(
     add_links: list[str] | None = None,
     prompt_version: str | None = None,
     extracted_by: str = "agent",
+    expected_version: int | None = None,
 ) -> dict[str, Any]:
-    """增量更新 concept。
+    """增量更新 concept (optimistic concurrency control via version).
 
-    add_extractions: 格式同 write_concept 的 extractions_data。
-    自动去重 source_ids + 更新 extractions 表 + 自动清 is_orphan=0。
+    并发: 整个事务包 BEGIN IMMEDIATE + write_with_retry. UPDATE 时 version+1.
+    多 agent 并发改同一 concept:
+      - 第一个 commit 后 version+1
+      - 第二个等锁拿到后 SELECT version, 不匹配 expected_version → OptimisticLockError
+        → agent 重新 read_concept + merge + 再 update_concept (新 expected_version)
+
+    add_extractions: 格式同 write_concept 的 extractions_data.
+    自动去重 source_ids + 更新 extractions 表 + 自动清 is_orphan=0.
+
+    expected_version (optional): CAS 标记. None=last-write-wins (快但可能丢数据),
+      int=strict CAS (不匹配抛 OptimisticLockError).
     """
+    from .errors import OptimisticLockError
     now = _utc_now_iso()
-    with connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT concept_id, source_ids, links FROM concepts WHERE slug=?", (slug,)
-        ).fetchone()
-        if not row:
-            raise StorageError(f"concept not found: {slug}")
-        concept_id = row["concept_id"]
+    with write_with_retry(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT concept_id, source_ids, links, version FROM concepts WHERE slug=?",
+                (slug,),
+            ).fetchone()
+            if not row:
+                raise StorageError(f"concept not found: {slug}")
+            concept_id = row["concept_id"]
+            current_version = row["version"]
 
-        old_source_ids = set(_parse_json_list(row["source_ids"]))
-        old_links = set(_parse_json_list(row["links"]))
-        if add_links:
-            add_links = _validate_links(slug, list(add_links))
-
-        updates: list[str] = []
-        params: list[Any] = []
-        if title is not None:
-            updates.append("title=?")
-            params.append(title)
-        if body is not None:
-            updates.append("body=?")
-            params.append(body)
-        if updates:
-            updates.append("updated_at=?")
-            params.append(now)
-            params.append(slug)
-            conn.execute(
-                f"UPDATE concepts SET {', '.join(updates)} WHERE slug=?",
-                params,
-            )
-
-        # add_extractions
-        added_source_ids: list[str] = []
-        extraction_ids: list[str] = []
-        if add_extractions:
-            for ed in add_extractions:
-                sid = ed.get("source_id")
-                qs = ed.get("quote_span")
-                if not sid:
-                    raise StorageError("extraction missing source_id")
-                if not qs or not qs.strip():
-                    raise StorageError(
-                        f"extraction for {sid} missing quote_span",
-                        hint="quote_span is required: the original text in the source that supports this concept",
-                    )
-                # source 是否 deleted?
-                src_row = conn.execute(
-                    "SELECT status FROM sources WHERE source_id=?", (sid,)
-                ).fetchone()
-                if not src_row:
-                    raise StorageError(f"source_id not found: {sid}")
-                if src_row["status"] == "deleted":
-                    raise ConflictError(
-                        f"cannot add extraction from deleted source: {sid}"
-                    )
-
-                if sid not in old_source_ids:
-                    added_source_ids.append(sid)
-                    old_source_ids.add(sid)
-
-                # 每次 add_extraction 都写一行（audit history）
-                ext_id = _new_uuid12("e_")
-                conn.execute(
-                    """INSERT INTO extractions
-                    (extraction_id, source_id, concept_slug, quote_span,
-                     char_start, char_end, extracted_at, extracted_by,
-                     prompt_version, confidence, source_content_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        ext_id,
-                        sid,
-                        slug,
-                        qs,
-                        ed.get("char_start"),
-                        ed.get("char_end"),
-                        now,
-                        extracted_by,
-                        prompt_version,
-                        ed.get("confidence"),
-                        _fetch_source_content_hash(conn, sid),
-                    ),
+            if expected_version is not None and current_version != expected_version:
+                raise OptimisticLockError(
+                    f"concept {slug!r} was modified concurrently "
+                    f"(current_version={current_version}, expected={expected_version})",
+                    hint="read_concept again, merge with current, then update_concept with new expected_version",
                 )
-                extraction_ids.append(ext_id)
 
-            new_source_ids_str = json.dumps(sorted(old_source_ids))
-            conn.execute(
-                "UPDATE concepts SET source_ids=?, is_orphan=0, updated_at=? WHERE slug=?",
-                (new_source_ids_str, now, slug),
-            )
+            old_source_ids = set(_parse_json_list(row["source_ids"]))
+            old_links = set(_parse_json_list(row["links"]))
+            if add_links:
+                add_links = _validate_links(slug, list(add_links))
 
-        if add_links:
-            old_links.update(add_links)
-            conn.execute(
-                "UPDATE concepts SET links=?, updated_at=? WHERE slug=?",
-                (json.dumps(sorted(old_links)), now, slug),
-            )
-            for to_slug in add_links:
+            # 合并所有 SET (合并到一个 UPDATE 提高效率)
+            set_parts: list[str] = []
+            params: list[Any] = []
+            if title is not None:
+                set_parts.append("title=?")
+                params.append(title)
+            if body is not None:
+                set_parts.append("body=?")
+                params.append(body)
+            # 每次有改动 version+1 (CAS 自增)
+            if set_parts or add_extractions or add_links:
+                set_parts.append("version=version+1")
+                set_parts.append("updated_at=?")
+                params.append(now)
+                params.append(slug)
                 conn.execute(
-                    "INSERT OR IGNORE INTO links (from_slug, to_slug) VALUES (?, ?)",
-                    (slug, to_slug),
+                    f"UPDATE concepts SET {', '.join(set_parts)} WHERE slug=?",
+                    params,
                 )
+
+            added_source_ids: list[str] = []
+            extraction_ids: list[str] = []
+            if add_extractions:
+                for ed in add_extractions:
+                    sid = ed.get("source_id")
+                    qs = ed.get("quote_span")
+                    if not sid:
+                        raise StorageError("extraction missing source_id")
+                    if not qs or not qs.strip():
+                        raise StorageError(
+                            f"extraction for {sid} missing quote_span",
+                            hint="quote_span is required: the original text in the source that supports this concept",
+                        )
+                    src_row = conn.execute(
+                        "SELECT status FROM sources WHERE source_id=?", (sid,)
+                    ).fetchone()
+                    if not src_row:
+                        raise StorageError(f"source_id not found: {sid}")
+                    if src_row["status"] == "deleted":
+                        raise ConflictError(
+                            f"cannot add extraction from deleted source: {sid}"
+                        )
+
+                    if sid not in old_source_ids:
+                        added_source_ids.append(sid)
+                        old_source_ids.add(sid)
+
+                    ext_id = _new_uuid12("e_")
+                    conn.execute(
+                        """INSERT INTO extractions
+                        (extraction_id, source_id, concept_slug, quote_span,
+                         char_start, char_end, extracted_at, extracted_by,
+                         prompt_version, confidence, source_content_hash)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            ext_id, sid, slug, qs,
+                            ed.get("char_start"), ed.get("char_end"),
+                            now, extracted_by, prompt_version,
+                            ed.get("confidence"),
+                            _fetch_source_content_hash(conn, sid),
+                        ),
+                    )
+                    extraction_ids.append(ext_id)
+
+                # source_ids / is_orphan 也要 version+1 (如果有 add_extractions 改了 source_ids)
+                conn.execute(
+                    "UPDATE concepts SET source_ids=?, is_orphan=0, version=version+1, updated_at=? WHERE slug=?",
+                    (json.dumps(sorted(old_source_ids)), now, slug),
+                )
+
+            if add_links:
+                old_links.update(add_links)
+                conn.execute(
+                    "UPDATE concepts SET links=?, version=version+1, updated_at=? WHERE slug=?",
+                    (json.dumps(sorted(old_links)), now, slug),
+                )
+                for to_slug in add_links:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO links (from_slug, to_slug) VALUES (?, ?)",
+                        (slug, to_slug),
+                    )
+
+            # 读最新 version (刚 UPDATE 多次, 拿 final)
+            new_version_row = conn.execute(
+                "SELECT version FROM concepts WHERE slug=?", (slug,),
+            ).fetchone()
+            new_version = new_version_row["version"] if new_version_row else current_version
+
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     return {
         "slug": slug,
         "updated_at": now,
+        "version": new_version,
         "added_source_ids": added_source_ids,
         "extraction_ids": extraction_ids,
         "source_ids": sorted(old_source_ids),
     }
+
 
 
 def add_source_to_concept(
