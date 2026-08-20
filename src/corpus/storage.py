@@ -33,12 +33,13 @@ from typing import Any, Iterator
 from .atomic import atomic_write_text
 from .errors import ConflictError, StorageError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Migration 步骤表: key=(from_v, to_v), value=函数(conn)
 _MIGRATIONS: dict[tuple[int, int], str] = {
     (1, 2): "_migrate_1_to_2",
     (2, 3): "_migrate_2_to_3",
+    (3, 4): "_migrate_3_to_4",
 }
 
 def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
@@ -214,7 +215,49 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ingest_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    op TEXT NOT NULL,
+    source_id TEXT,
+    source_path TEXT,
+    actor TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    status TEXT NOT NULL,
+    details TEXT,
+    source_content_hash TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_log_started_at ON ingest_log(started_at);
+CREATE INDEX IF NOT EXISTS idx_ingest_log_source_id ON ingest_log(source_id);
+CREATE INDEX IF NOT EXISTS idx_ingest_log_op ON ingest_log(op);
+
 """
+
+
+
+
+def _migrate_3_to_4(conn: sqlite3.Connection) -> None:
+    """v3 -> v4: 加 ingest_log 表 (audit log for source ops)."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ingest_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            op TEXT NOT NULL,
+            source_id TEXT,
+            source_path TEXT,
+            actor TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            status TEXT NOT NULL,
+            details TEXT,
+            source_content_hash TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_ingest_log_started_at ON ingest_log(started_at);
+        CREATE INDEX IF NOT EXISTS idx_ingest_log_source_id ON ingest_log(source_id);
+        CREATE INDEX IF NOT EXISTS idx_ingest_log_op ON ingest_log(op);
+        """
+    )
 
 
 def _utc_now_iso() -> str:
@@ -344,6 +387,87 @@ def _parse_json_list(s: str | None) -> list[Any]:
     if not s:
         return []
     return json.loads(s)
+
+
+def log_ingest(
+    db_path: Path,
+    *,
+    op: str,
+    source_id: str | None = None,
+    source_path: str | None = None,
+    actor: str = "agent",
+    started_at: str | None = None,
+    ended_at: str | None = None,
+    status: str = "ok",
+    details: dict[str, Any] | None = None,
+    source_content_hash: str | None = None,
+) -> int:
+    """写一行 ingest_log. 返回新行 id.
+
+    op: 'stage' | 'revive' | 'commit' | 'delete' | 'batch'
+    status: 'ok' | 'failed' | 'skipped_duplicate' | 'skipped_locked'
+    details: dict -> JSON 存 (reason / error / extras)
+    """
+    if started_at is None:
+        started_at = _utc_now_iso()
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            """INSERT INTO ingest_log
+            (op, source_id, source_path, actor, started_at, ended_at, status, details, source_content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                op, source_id, source_path, actor,
+                started_at, ended_at, status,
+                json.dumps(details) if details else None,
+                source_content_hash,
+            ),
+        )
+    return cur.lastrowid or 0
+
+
+def list_ingest_log(
+    db_path: Path,
+    *,
+    op: str | None = None,
+    source_id: str | None = None,
+    since: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """查 ingest_log. 按 started_at DESC 排序.
+
+    op: 过滤操作类型 (stage / commit / delete / revive / batch)
+    source_id: 过滤 source
+    since: 过滤 started_at >= since (ISO timestamp)
+    limit: 最多返回条数
+    """
+    where_clauses: list[str] = []
+    params: list[Any] = []
+    if op:
+        where_clauses.append("op = ?")
+        params.append(op)
+    if source_id:
+        where_clauses.append("source_id = ?")
+        params.append(source_id)
+    if since:
+        where_clauses.append("started_at >= ?")
+        params.append(since)
+    sql = "SELECT * FROM ingest_log"
+    if where_clauses:
+        sql += " WHERE " + " AND ".join(where_clauses)
+    sql += " ORDER BY started_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    with connect(db_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("details"):
+            try:
+                d["details"] = json.loads(d["details"])
+            except json.JSONDecodeError:
+                pass
+        out.append(d)
+    return out
 
 
 # ============================================================================

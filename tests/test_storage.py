@@ -485,8 +485,8 @@ def test_stage_source_active_duplicate_still_rejected(db: Path):
 
 # ---------- init_db migration v1 -> v2 ----------
 
-def test_init_db_upgrades_v1_to_v3(tmp_path: Path):
-    """模拟老库 (v1 DDL) → init_db 升级到 v3 (经过 v2 + v3 migration)."""
+def test_init_db_upgrades_v1_to_v4(tmp_path: Path):
+    """模拟老库 (v1 DDL) → init_db 升级到 v4 (经过 v2 + v3 + v4 migration chain)."""
     import sqlite3
 
     db_path = tmp_path / "legacy.db"
@@ -532,7 +532,7 @@ def test_init_db_upgrades_v1_to_v3(tmp_path: Path):
         rows = c.execute("SELECT * FROM sources").fetchall()
         assert len(rows) == 2
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver["value"]) == 3
+        assert int(ver["value"]) == 4
         # 索引存在
         idx = c.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sources_content_hash'"
@@ -540,16 +540,16 @@ def test_init_db_upgrades_v1_to_v3(tmp_path: Path):
         assert idx is not None
 
 
-def test_init_db_idempotent_on_v3(tmp_path: Path):
-    """已 v3 的库 init_db 多次也幂等, version 不漂."""
-    db_path = tmp_path / "v3.db"
+def test_init_db_idempotent_on_v4(tmp_path: Path):
+    """已 v4 的库 init_db 多次也幂等, version 不漂."""
+    db_path = tmp_path / "v4.db"
     init_db(db_path)
     init_db(db_path)
     init_db(db_path)
     import sqlite3
     with sqlite3.connect(str(db_path)) as c:
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver[0]) == 3
+        assert int(ver[0]) == 4
 
 
 # ---------- delete_concept ----------
@@ -1037,3 +1037,91 @@ def test_update_concept_cas_concurrent_subprocess(tmp_path: Path):
             rc_counts["cas_fail"] = rc_counts.get("cas_fail", 0) + 1
     assert rc_counts.get("ok") == 1, f"期望 1 成功, 实际 {rc_counts}"
     assert rc_counts.get("cas_fail") == 1, f"期望 1 CAS fail, 实际 {rc_counts}"
+
+
+# ---------- ingest_log (audit log) ----------
+
+def test_log_ingest_writes_and_lists(db: Path):
+    """log_ingest 写一行, list_ingest_log 能读出来."""
+    from corpus.storage import log_ingest, list_ingest_log
+    log_ingest(db, op="stage", source_id="abc", source_path="/raw/abc.md",
+               actor="agent", status="ok", source_content_hash="hash1")
+    log_ingest(db, op="commit", source_id="abc", actor="agent", status="ok")
+    log_ingest(db, op="delete", source_id="def", actor="cli",
+               status="ok", details={"reason": "version update"})
+    entries = list_ingest_log(db)
+    assert len(entries) == 3
+    # 按 started_at DESC, 最后写入的 (delete) 在最前
+    assert entries[0]["op"] == "delete"
+    assert entries[0]["details"] == {"reason": "version update"}
+    assert entries[1]["op"] == "commit"
+    assert entries[2]["op"] == "stage"
+    assert entries[2]["source_content_hash"] == "hash1"
+
+
+def test_list_ingest_log_filters(db: Path):
+    """list_ingest_log 按 op / source_id / since 过滤."""
+    from corpus.storage import log_ingest, list_ingest_log
+    log_ingest(db, op="stage", source_id="s1", actor="a", status="ok")
+    log_ingest(db, op="commit", source_id="s1", actor="a", status="ok")
+    log_ingest(db, op="stage", source_id="s2", actor="a", status="failed",
+               details={"error": "disk full"})
+
+    # op filter
+    stages = list_ingest_log(db, op="stage")
+    assert len(stages) == 2
+    assert all(e["op"] == "stage" for e in stages)
+
+    # source_id filter
+    s1 = list_ingest_log(db, source_id="s1")
+    assert len(s1) == 2
+
+    # status filter (impossible - status is not a filter param, use details check)
+    failed = [e for e in list_ingest_log(db) if e["status"] == "failed"]
+    assert len(failed) == 1
+    assert failed[0]["details"] == {"error": "disk full"}
+
+
+def test_migration_v3_to_v4_adds_ingest_log(tmp_path: Path):
+    """v3 库 init_db 应自动 migration v3 -> v4, 加 ingest_log 表."""
+    import sqlite3
+    # 建 v3 库 (无 ingest_log 表)
+    db_path = tmp_path / "v3.db"
+    conn = sqlite3.connect(str(db_path))
+    # v3 schema 简化版 (只有 sources / concepts / schema_meta, 无 ingest_log)
+    conn.executescript("""
+        CREATE TABLE sources (
+            source_id TEXT PRIMARY KEY, raw_path TEXT NOT NULL, original_filename TEXT,
+            size_bytes INTEGER NOT NULL, content_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'staged',
+            created_at TEXT NOT NULL, committed_at TEXT, deleted_at TEXT, deleted_reason TEXT
+        );
+        CREATE TABLE concepts (
+            concept_id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
+            body TEXT NOT NULL, source_ids TEXT NOT NULL DEFAULT '[]',
+            links TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            is_orphan INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0,
+            certified_at TEXT, certified_score REAL, certified_issues TEXT,
+            certified_suggestions TEXT, certified_by TEXT
+        );
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');
+    """)
+    conn.commit(); conn.close()
+
+    # 跑 init_db 升级
+    from corpus.storage import init_db, log_ingest
+    init_db(db_path)
+
+    # 验 schema_version 升到 4
+    with sqlite3.connect(str(db_path)) as c:
+        ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+        assert int(ver[0]) == 4
+        # ingest_log 表存在
+        log_ingest(db_path, op="stage", source_id="post-mig", actor="test", status="ok")
+        c.row_factory = sqlite3.Row
+        rows = c.execute("SELECT * FROM ingest_log").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["op"] == "stage"
+        assert rows[0]["source_id"] == "post-mig"

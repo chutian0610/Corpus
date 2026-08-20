@@ -21,6 +21,7 @@ from .ids import source_id_from_content
 from .storage import (
     SCHEMA_VERSION,
     add_source_to_concept,
+    list_ingest_log,
     certification_stats,
     commit_source,
     delete_concept,
@@ -381,6 +382,59 @@ def sources_batch(
         },
         as_json=as_json,
     )
+
+
+@cli.command(name="audit")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.option("--op", "op_filter", default=None,
+              help="过滤操作类型 (stage / commit / delete / revive / batch)")
+@click.option("--source-id", default=None, help="只看这个 source 的 audit")
+@click.option("--since", default=None, help="只看这个 ISO timestamp 之后的")
+@click.option("--limit", "-n", type=int, default=50, help="最多返回条数 (默认 50)")
+@click.option("--json", "as_json", is_flag=True, help="以 JSON 格式输出")
+def cli_audit(
+    vault_path: Path, op_filter: str | None, source_id: str | None,
+    since: str | None, limit: int, as_json: bool,
+) -> None:
+    """查 vault 操作审计日志 (ingest_log 表). 按时间倒序.
+
+    ingest_log 记录每次 source 操作的 metadata:
+      - op: stage / commit / delete / revive / batch
+      - source_id, source_path, source_content_hash
+      - actor (cli / agent), started_at, ended_at
+      - status (ok / failed / skipped_duplicate / skipped_locked)
+      - details (JSON: reason / error / extras)
+    """
+    paths = _resolve_db(vault_path)
+    entries = list_ingest_log(
+        paths["corpus_db"],
+        op=op_filter,
+        source_id=source_id,
+        since=since,
+        limit=limit,
+    )
+    if as_json:
+        click.echo(json.dumps(entries, indent=2, ensure_ascii=False))
+        return
+    # humanize
+    if not entries:
+        click.echo("(no audit log entries)")
+        return
+    click.echo(f"audit log ({len(entries)} entries, latest first):")
+    for e in entries:
+        sid = e.get("source_id") or "-"
+        path = e.get("source_path") or ""
+        path_short = path.split("/")[-1] if path else ""
+        status = e.get("status", "?")
+        op = e.get("op", "?")
+        actor = e.get("actor", "?")
+        started = e.get("started_at", "?")
+        details = e.get("details") or {}
+        detail_str = ""
+        if details:
+            keys = list(details.keys())[:3]
+            detail_str = " " + " ".join(f"{k}={details[k]}" for k in keys)
+        click.echo(f"  {started}  {op:6s}  {status:20s}  {sid[:12]:12s}  {path_short}{detail_str}")
 
 
 @sources.command(name="list")

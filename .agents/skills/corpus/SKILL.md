@@ -180,6 +180,7 @@ error: <message>
 - `no fields to update` → `concepts certify` 至少传一个 `--score / --issues / --suggestions`
 - `score is required for first-time certification` → 首次认证必传 `--score` (后续 partial update 可省)
 - `path is inside vault raw/` → `sources ingest` 不接受 vault 内文件. raw/ 是 ingest 产物目录, 想重新入库同一文件先 `sources delete <sid>`
+- (audit log 报错) → `ingest_log` 表是 schema v4 加的, 旧 vault 跑 init_db 自动 migration. 用 `corpus audit` 查操作历史
 - `score must be in [0, 1]` → 0-1 之间的数
 
 sources.batch 的每个 result 也带 `hint` 字段 (deleted 行未带 `--force-revive` 时填)。
