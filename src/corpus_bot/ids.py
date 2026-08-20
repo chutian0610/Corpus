@@ -16,9 +16,6 @@ import time
 # 16 hex chars (64-bit entropy) — 撞 hash 概率 ~1e-9 在 10亿 规模内
 SOURCE_ID_LENGTH = 16
 SLUG_MAX_LENGTH = 80
-SUFFIX_HEX_LENGTH = 4
-
-
 def source_id_from_content(content: str | bytes) -> str:
     """生成 source_id = sha256(content)[:16]。
 
@@ -46,8 +43,10 @@ def slugify(title: str) -> str:
 
 
 def rename_suffix() -> str:
-    """生成撞名改名的后缀：<unix_ts>_<4hex>。"""
-    ts = int(time.time())
-    # 用时间戳末 4 位 + 短随机
-    random_hex = hashlib.sha256(str(ts).encode()).hexdigest()[:SUFFIX_HEX_LENGTH]
-    return f"{ts}_{random_hex}"
+    """生成撞名改名的后缀: ingest-<UTC compact ISO>, 形如 ingest-20260820-183000.
+
+    与 _utc_now_iso() 一致用 UTC; 不带冒号 (Windows 文件名非法); 不带 Z (compact).
+    同秒撞名概率对人类操作可忽略, 不再叠 4hex 随机.
+    """
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("ingest-%Y%m%d-%H%M%S")

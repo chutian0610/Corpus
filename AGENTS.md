@@ -88,7 +88,7 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 - `sources ingest <vault> <file>` / `sources batch`：
   - content-hash dedup：同 hash 已 active (staged/committed) → `ConflictError` (exit 1)
   - 同 hash 已 soft-deleted → 默认 `ConflictError` 提示 `--force-revive`；加 flag → 复用原 `source_id`，status='staged'，刷新 `raw_path`/`content_hash`
-  - 撞名检测（`pick_raw_target` in `vault.py`）：raw/ 下同名但 sid 不同 → 自动改名 `<stem>_<unix_ts>_<4hex><ext>`；同 sid → 允许覆写 (idempotent)
+  - 文件名生成（`pick_raw_target` in `vault.py`）：**所有 ingest 都加** `-ingest-<UTC compact ISO>` 后缀（例 `postgresql-mvcc-ingest-20260820-183000.md`），不再依赖撞名检测；同内容二次入库由 content_hash dedup 在 stage_source 拦下
 - `sources delete <sid>`（软删）：`status='deleted'`，自动从引用它的 concept.source_ids 移除；**不级联删 concept**
 - 如果删后 concept.source_ids 变空 → 自动 `is_orphan=1`
 - `concepts write --extractions '[...]'`：**强制每个 source 一段 quote_span 原文证据**

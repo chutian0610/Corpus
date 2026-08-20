@@ -135,26 +135,19 @@ def validate_source_path(vault_root: Path, source_path: str) -> Path:
 
 
 def pick_raw_target(raw_dir: Path, content: str, hint_name: str) -> Path:
-    """撞名改名：raw/<hint_name> 已被不同内容占用 → <stem>_<ts>_<4hex><suffix>.
+    """所有 ingest 都生成 raw/<stem>-ingest-<UTC compact ISO><suffix>.
 
-    同 sid (同一内容) → 直接返回原路径 (覆写是 idempotent, OK 的).
-    raw_dir 不存在 / 文件不可读 → 直接返回原路径 (让 stage_source 决定).
+    默认加 ingest 时间戳后缀 (与 stage_source 写入一一对应):
+      - 同内容二次 ingest 会被 content_hash dedup 在 stage_source 拦下,
+        根本走不到改名, 所以 idempotent 不依赖文件名
+      - 撞名 (同秒入库) 概率对人类操作可忽略, 不再叠 hash 随机
+      - DB 已存 original_filename 字段供 source 元数据检索, raw 文件名仅做内部唯一标识
+
+    返回路径不保证对应 raw/ 里已存在的文件 (caller stage_source + write_text 处理).
     """
-    from .ids import source_id_from_content, rename_suffix
-
-    target = raw_dir / hint_name
-    if not target.exists():
-        return target
-
-    try:
-        existing_bytes = target.read_bytes()
-    except OSError:
-        return target
-
-    if source_id_from_content(existing_bytes) == source_id_from_content(content):
-        return target  # same content, overwrite is fine
+    from .ids import rename_suffix
 
     stem = Path(hint_name).stem
     suffix = Path(hint_name).suffix
-    return raw_dir / f"{stem}_{rename_suffix()}{suffix}"
+    return raw_dir / f"{stem}-{rename_suffix()}{suffix}"
 

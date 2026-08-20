@@ -29,14 +29,16 @@ def _runner():
 
 # ---------- sources ingest 撞名修复 ----------
 
-def test_batch_renames_on_name_collision(vault: Path):
-    """batch: raw/ 已有 v1 同名, 目录里有 v2 同名 → v2 自动改名, v1 不丢.
+def test_batch_handles_existing_raw_file_without_clobber(vault: Path):
+    """batch: raw/ 里手工放一个 v1 文件 (模拟外部已存 source) 不会被 batch 覆盖.
 
-    这是真实撞名场景: 不同会话/工具各 ingest 同一文件名但不同内容.
+    batch 总是为新文件生成 -ingest-<ts> 后缀, 所以 raw/v1.md 保留,
+    新文件变成 raw/note-ingest-<ts>.md.
     """
+    import re
     r = _runner()
 
-    # 步骤 1: 在 raw/ 里手工放一个 v1 文件 (模拟已入库的旧 source)
+    # 步骤 1: 在 raw/ 里手工放一个 v1 文件
     (vault / "raw" / "note.md").write_text("# version 1 - already in raw\n", encoding="utf-8")
 
     # 步骤 2: batch 一个目录, 里有 note.md 但内容完全不同
@@ -50,13 +52,14 @@ def test_batch_renames_on_name_collision(vault: Path):
     assert res.exit_code == 0, res.stderr
 
     raw_files = sorted(p.name for p in (vault / "raw").iterdir())
-    # 应该有 2 个文件: 原来的 v1 (note.md) + 改名的 v2
+    # 应该有 2 个文件: 原 v1 (note.md) + 改 ingest 后缀的 v2
     assert len(raw_files) == 2
-    assert "note.md" in raw_files
+    assert "note.md" in raw_files  # v1 保留
     renamed_name = next(f for f in raw_files if f != "note.md")
-    assert renamed_name.startswith("note_") and renamed_name.endswith(".md")
+    assert renamed_name.startswith("note-ingest-") and renamed_name.endswith(".md"), renamed_name
+    assert re.search(r"ingest-\d{8}-\d{6}", renamed_name)
 
-    # v1 内容未被覆盖 (旧 source 仍指向原文件)
+    # v1 内容未被覆盖
     assert (vault / "raw" / "note.md").read_text(encoding="utf-8") == "# version 1 - already in raw\n"
     # v2 内容在改名后的文件里
     assert (vault / "raw" / renamed_name).read_text(encoding="utf-8") == "# version 2 - completely different\n"
@@ -164,13 +167,7 @@ def test_batch_renames_and_counts_revived(vault: Path):
     src_dir.mkdir()
     (src_dir / "note.md").write_text("# note v1\n", encoding="utf-8")
     (src_dir / "ghost.md").write_text("ghost content", encoding="utf-8")
-    (src_dir / "note.md").write_text("# note v1 modified\n", encoding="utf-8")  # 再覆盖
-
-    # raw 里放一个占位同名文件触发撞名 (虽然 batch 模式下不需要, 测的是改名逻辑)
-    # 实际上 batch 是从 source_dir 读, target = pick_raw_target(raw, content, src.name)
-    # 如果 raw 里没有同名 → target = raw/<src.name> (不撞名)
-    # 我们想测 batch 内有同 dir 下不同 content 但同名? 不可能, 一个 dir 不会有同名文件
-    # 所以 batch 的撞名主要场景: raw/ 里已有别的 source 同名
+    # 注意: batch 现在每个文件都生成 -ingest-<ts> 后缀, 无需撞名检测
     res = r.invoke(cli, [
         "sources", "batch", str(vault), str(src_dir),
         "--force-revive", "--json",

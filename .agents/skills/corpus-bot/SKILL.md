@@ -33,7 +33,7 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 # 1. 初始化 vault（一次性）
 corpus-bot vault init ~/my-wiki
 
-# 2. 落源（content-hash dedup，撞名自动改名；软删复活用 --force-revive）
+# 2. 落源（content-hash dedup，所有 ingest 都加 `-ingest-<UTC compact ISO>` 后缀；软删复活用 --force-revive）
 corpus-bot sources ingest ~/my-wiki ~/notes/postgresql.md
 # 同 hash 已 soft-deleted? 加 --force-revive 复活同一 source_id
 corpus-bot sources ingest --force-revive ~/my-wiki ~/notes/postgresql.md
@@ -217,7 +217,7 @@ corpus-bot sources delete <vault> <sid> --yes --reason version-update
 | `vault init <path>` | 创建 vault 目录 + 初始化 SQLite |
 | `vault info <path>` | vault 路径表 + 元信息 |
 | `vault stats <path>` / `stats <path>` | source/concept 统计 + 认证覆盖率 |
-| `sources ingest <vault> <file>` | 单文件入库（content-hash dedup + 撞名改名）|
+| `sources ingest <vault> <file>` | 单文件入库（content-hash dedup + `-ingest-<ts>` 后缀）|
 | `sources ingest ... --force-revive` | 同 hash 已 soft-deleted → 复活该 source_id |
 | `sources batch <vault> <dir> [--glob]` | 批量入库 |
 | `sources list <vault> [--status]` | 列源 |

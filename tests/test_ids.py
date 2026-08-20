@@ -51,8 +51,15 @@ def test_slugify_empty_fallback():
 
 
 def test_rename_suffix_format():
+    """格式: ingest-<UTC compact ISO>, 例 ingest-20260820-183000."""
+    import re
     s = rename_suffix()
-    parts = s.split("_")
-    assert len(parts) == 2
-    assert parts[0].isdigit()
-    assert len(parts[1]) == 4  # 4 hex
+    assert s.startswith("ingest-")
+    # ingest- + 8位日期 + - + 6位时间
+    m = re.fullmatch(r"ingest-(\d{8})-(\d{6})", s)
+    assert m is not None, f"unexpected format: {s!r}"
+    # 简单 sanity: 日期 2025+ (系统当前年份之后), 时间 < 240000
+    yyyymmdd = m.group(1)
+    hhmmss = m.group(2)
+    assert int(yyyymmdd[:4]) >= 2025
+    assert int(hhmmss) < 240000

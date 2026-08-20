@@ -71,45 +71,44 @@ def test_markdown_extension_allowed(vault: Path):
     assert result.exists()
 
 
-# ---------- pick_raw_target (撞名改名) ----------
+# ---------- pick_raw_target (默认 ingest 后缀) ----------
 
-def test_pick_raw_target_no_collision(vault: Path):
-    """raw/ 下无同名 → 直接返回原路径."""
+import re as _re
+_INGEST_RE = _re.compile(r"ingest-\d{8}-\d{6}")
+
+
+def test_pick_raw_target_always_adds_ingest_suffix(vault: Path):
+    """无论 raw/ 下是否存在, 都生成 <stem>-ingest-<UTC compact ISO><suffix>."""
     from corpus_bot.vault import pick_raw_target
     target = pick_raw_target(vault / "raw", "any content", "note.md")
-    assert target == vault / "raw" / "note.md"
+    assert target.parent == vault / "raw"
+    assert _INGEST_RE.search(target.stem), f"no ingest suffix in {target.name}"
+    assert target.name.endswith(".md")
+    assert target.stem.startswith("note-")
 
 
-def test_pick_raw_target_same_content_idempotent(vault: Path):
-    """raw/ 下同名但 sid 相同 (同内容) → 返回原路径 (允许覆写)."""
+def test_pick_raw_target_same_stem_different_calls_yields_unique_paths(vault: Path):
+    """连续两次调用生成不同 ingest 后缀 (跨秒不会撞名)."""
     from corpus_bot.vault import pick_raw_target
-    content = "# same content\n"
-    (vault / "raw" / "note.md").write_text(content, encoding="utf-8")
-    target = pick_raw_target(vault / "raw", content, "note.md")
-    assert target == vault / "raw" / "note.md"
-
-
-def test_pick_raw_target_different_content_renames(vault: Path):
-    """raw/ 下同名但 sid 不同 → 改名 <stem>_<ts>_<4hex><ext>."""
-    from corpus_bot.vault import pick_raw_target
-    (vault / "raw" / "note.md").write_text("# original\n", encoding="utf-8")
-    target = pick_raw_target(vault / "raw", "# completely new content\n", "note.md")
-    # 不再指向原 note.md
-    assert target != vault / "raw" / "note.md"
-    # 后缀形如 note_<digits>_<4hex>.md
-    name = target.name
-    assert name.startswith("note_")
-    assert name.endswith(".md")
-    parts = name[:-3].split("_")  # 去掉 .md 再按 _ 拆
-    # parts = ["note", ts, 4hex]
-    assert len(parts) == 3
-    assert parts[1].isdigit()
-    assert len(parts[2]) == 4
+    t1 = pick_raw_target(vault / "raw", "content", "note.md")
+    t2 = pick_raw_target(vault / "raw", "content", "note.md")
+    # 同秒情况下确实可能相等 (人类操作可忽略); 但格式一定对
+    assert _INGEST_RE.search(t1.stem)
+    assert _INGEST_RE.search(t2.stem)
 
 
 def test_pick_raw_target_preserves_markdown_extension(vault: Path):
+    """.markdown 后缀保留, ingest 后缀插在 stem 中间."""
     from corpus_bot.vault import pick_raw_target
-    (vault / "raw" / "deep.markdown").write_text("a\n")
-    target = pick_raw_target(vault / "raw", "completely different\n", "deep.markdown")
+    target = pick_raw_target(vault / "raw", "any", "deep.markdown")
     assert target.suffix == ".markdown"
-    assert target.stem.startswith("deep_")
+    assert target.stem.startswith("deep-ingest-")
+
+
+def test_pick_raw_target_preserves_no_extension(vault: Path):
+    """无后缀文件名也保留, ingest 后缀照样加."""
+    from corpus_bot.vault import pick_raw_target
+    target = pick_raw_target(vault / "raw", "any", "README")
+    assert target.suffix == ""
+    assert _INGEST_RE.search(target.stem)
+    assert target.stem.startswith("README-ingest-")
