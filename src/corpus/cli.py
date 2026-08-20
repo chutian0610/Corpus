@@ -25,6 +25,8 @@ from .storage import (
     list_ingest_log,
     read_concept,
     write_concept_file,
+    write_source_wiki_page,
+    update_source_page_concepts,
     write_source_file,
     certification_stats,
     commit_source,
@@ -70,6 +72,8 @@ def _sync_concept_file(paths, slug: str) -> None:
 
     同步点: 任何写 DB 的命令 (write/update/add-source/remove-source/remove-extraction/
     certify) 调一下, 保持 markdown 文件 = DB view. recovery 时从 markdown 还原 DB.
+
+    副作用: 也更新 concept 引用的 source wiki pages (双向同步).
     """
     info = read_concept(paths["corpus_db"], slug)
     if info is None:
@@ -92,6 +96,9 @@ def _sync_concept_file(paths, slug: str) -> None:
         status=info.get("status") or "draft",
         tags=info.get("tags"),
     )
+    # 双向同步: 更新 concept 引用的每个 source page
+    for sid in info["source_ids"]:
+        update_source_page_concepts(paths["root"], sid)
 
 
 
@@ -333,6 +340,17 @@ def sources_ingest(vault_path: Path, source_file: Path, force_revive: bool, as_j
         write_source_file(
             paths["root"],
             raw_path,
+            source_id=result["source_id"],
+            original_filename=canonical.name,
+            content_hash=result["content_hash"],
+            size_bytes=result["size_bytes"],
+            status="staged",
+            body=content,
+        )
+        # 写 wiki/source/<source_id>.md (per-source wiki page, 'Concepts extracted' 段
+        # 现在为空, 等 concepts add-source 触发 update_source_page_concepts 后更新)
+        write_source_wiki_page(
+            paths["root"],
             source_id=result["source_id"],
             original_filename=canonical.name,
             content_hash=result["content_hash"],
@@ -652,6 +670,9 @@ def concepts_write(
                 hint="DB rows rolled back via delete_concept; no orphan concept left",
             )
         result["wiki_path"] = str(wiki_path) if wiki_path else None
+        # 双向同步: 更新每个 source page 的 '## Concepts extracted' 段 (反查 extractions)
+        for sid in result["source_ids"]:
+            update_source_page_concepts(paths["root"], sid)
         # 自动 export index
         export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
@@ -979,6 +1000,8 @@ def concepts_add_source(vault_path: Path, slug: str, source_id: str, quote_span:
         )
         export_index(paths["corpus_db"], paths["wiki_index"])
         _sync_concept_file(paths, slug)
+        # 双向同步: 更新 source wiki page 的 '## Concepts extracted' 段
+        update_source_page_concepts(paths["root"], source_id)
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
@@ -1002,6 +1025,9 @@ def concepts_remove_extraction(vault_path: Path, extraction_id: str, as_json: bo
         result = remove_extraction(paths["corpus_db"], extraction_id)
         export_index(paths["corpus_db"], paths["wiki_index"])
         _sync_concept_file(paths, result["concept_slug"])
+        # result 含 source_id (remove_extraction return)
+        if result.get("source_id"):
+            update_source_page_concepts(paths["root"], result["source_id"])
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
@@ -1019,6 +1045,7 @@ def concepts_remove_source(vault_path: Path, slug: str, source_id: str, as_json:
         result = remove_source_from_concept(paths["corpus_db"], slug, source_id)
         export_index(paths["corpus_db"], paths["wiki_index"])
         _sync_concept_file(paths, slug)
+        update_source_page_concepts(paths["root"], source_id)
     except Exception as e:
         _err(str(e))
     _emit(result, as_json=as_json)

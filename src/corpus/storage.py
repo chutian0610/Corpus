@@ -903,6 +903,96 @@ def write_source_file(
     return raw_path
 
 
+def _build_concepts_extracted_section(
+    vault_root: Path, source_id: str, body: str,
+) -> str:
+    """生成 '## Concepts extracted from this source' section, 反查 extractions 表."""
+    db_path = vault_root / ".wiki-meta" / "corpus.db"
+    if not db_path.exists():
+        return "## Concepts extracted from this source\n\n_(no DB)_\n"
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT concept_slug, quote_span, prompt_version, extracted_at, confidence
+            FROM extractions WHERE source_id=?
+            ORDER BY extracted_at DESC""",
+            (source_id,),
+        ).fetchall()
+    if not rows:
+        return "## Concepts extracted from this source\n\n_(none yet)_\n"
+    lines = ["## Concepts extracted from this source", ""]
+    for r in rows:
+        confidence_str = f" (confidence {r['confidence']:.2f})" if r["confidence"] is not None else ""
+        prompt_str = f" [{r['prompt_version']}]" if r["prompt_version"] else ""
+        quote = (r["quote_span"] or "").replace("\n", " ")[:80]
+        if len(r["quote_span"] or "") > 80:
+            quote += "..."
+        lines.append(
+            f"- [[{r['concept_slug']}]]{prompt_str}{confidence_str} \u2014 \"{quote}\" ({r['extracted_at']})"
+        )
+    return "\n".join(lines)
+
+
+def write_source_wiki_page(
+    vault_root: Path,
+    source_id: str,
+    *,
+    original_filename: str | None = None,
+    content_hash: str | None = None,
+    size_bytes: int | None = None,
+    status: str = "staged",
+    created_at: str | None = None,
+    body: str = "",
+) -> Path:
+    """写 wiki/source/<source_id>.md (per-source wiki 页).
+
+    frontmatter: source_id / original_filename / content_hash / size_bytes / status / created_at.
+    body: 原始 markdown (用户提供) + '## Concepts extracted from this source' section (DB 反查填充).
+
+    替代 wiki/index/concepts.json 里 source 列表, 直接 git 跟踪.
+    """
+    pages_dir = vault_root / "wiki" / "source"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    path = pages_dir / f"{source_id}.md"
+    now = created_at or _utc_now_iso()
+    meta = {
+        "source_id": source_id,
+        "type": "source",
+    }
+    if original_filename:
+        meta["original_filename"] = original_filename
+    if content_hash:
+        meta["content_hash"] = content_hash
+    if size_bytes is not None:
+        meta["size_bytes"] = size_bytes
+    meta["status"] = status
+    meta["created_at"] = now
+    concepts_section = _build_concepts_extracted_section(vault_root, source_id, body)
+    full_body = body.rstrip() + "\n\n" + concepts_section
+    _write_md(path, meta=meta, body=full_body)
+    return path
+
+
+def update_source_page_concepts(vault_root: Path, source_id: str) -> None:
+    """重写 wiki/source/<source_id>.md 的 '## Concepts extracted' section.
+
+    从 DB 反查 extractions (source_id), 重新生成完整 file.
+    调用场景: concepts add-source / remove-source / remove-extraction 改了 extractions 后.
+    """
+    path = vault_root / "wiki" / "source" / f"{source_id}.md"
+    if not path.exists():
+        return
+    meta, body = _read_md(path)
+    section_marker = "\n## Concepts extracted from this source"
+    if section_marker in body:
+        original_body = body.split(section_marker)[0].rstrip()
+    else:
+        original_body = body.rstrip()
+    new_concepts_section = _build_concepts_extracted_section(
+        vault_root, source_id, original_body,
+    )
+    _write_md(path, meta=meta, body=new_concepts_section)
+
+
 def read_source_file(path: Path) -> dict[str, Any] | None:
     """读 raw/<file>-ingest-...md frontmatter."""
     if not path.exists():
