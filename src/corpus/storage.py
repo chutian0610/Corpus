@@ -1017,6 +1017,7 @@ def write_concept(
                 )
             # INSERT 路径
             cid = _new_uuid12("c_")
+            current_version = 0  # 新 concept 从 version 0 开始 (UPDATE 路径才在 SELECT 拿)
             try:
                 conn.execute(
                     """INSERT INTO concepts
@@ -1078,6 +1079,8 @@ def write_concept(
         "slug": slug,
         "source_ids": final_source_ids,
         "extraction_ids": extraction_ids,
+        "created_at": now,
+        "version": current_version,  # INSERT 路径下 current_version=0
     }
 
 

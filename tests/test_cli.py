@@ -384,13 +384,12 @@ def test_concepts_write_rolls_back_db_on_wiki_write_failure(vault: Path, externa
     # 让 wiki_path.write_text 抛 OSError
     from corpus import cli as cli_mod
     real_write_text = type(cli_mod.Path("x")).write_text if False else None
-    # 用 monkeypatch patch cli 模块已 import 的 atomic_write_text
-    real = cli_mod.atomic_write_text
-    def boom(target, content, *, encoding="utf-8"):
-        if "wiki" in str(target) and "concept" in str(target) and str(target).endswith(".md"):
-            raise OSError("simulated disk full")
-        return real(target, content, encoding=encoding)
-    monkeypatch.setattr(cli_mod, "atomic_write_text", boom)
+    # 用 monkeypatch patch write_concept_file 模拟磁盘满 (frontmatter 写失败 -> DB 回滚)
+    from corpus import storage as _storage
+    real = _storage.write_concept_file
+    def boom(vault_root, **kwargs):
+        raise OSError("simulated disk full")
+    monkeypatch.setattr(cli_mod, "write_concept_file", boom)
 
     res = _runner().invoke(cli, [
         "concepts", "write", str(vault),

@@ -23,6 +23,7 @@ from .storage import (
     add_source_to_concept,
     dedup_candidate_scores,
     list_ingest_log,
+    write_concept_file,
     certification_stats,
     commit_source,
     delete_concept,
@@ -588,17 +589,24 @@ def concepts_write(
             prompt_version=prompt_version,
         )
         # 物理写文件 (失败需回滚 DB, 避免概念存在但 wiki 文件缺的不一致)
-        wiki_path = paths["wiki_concept"] / f"{slug}.md"
-        frontmatter = f"---\nslug: {slug}\ntitle: {title}\n---\n\n"
+        # frontmatter 含全部 metadata (slug/title/source_ids/links/version/created_at/updated_at/...)
+        # 让 wiki/concept/<slug>.md 是 source of truth (git 跟踪, 换电脑能 recover)
+        wiki_path = None
         try:
-            atomic_write_text(wiki_path, frontmatter + body, encoding="utf-8")
+            wiki_path = write_concept_file(
+                paths["root"], slug=slug, title=title, body=body,
+                source_ids=result["source_ids"],
+                links=link_list,
+                version=result["version"],
+                created_at=result["created_at"],
+            )
         except OSError as e:
             delete_concept(paths["corpus_db"], slug)
             _err(
                 f"failed to write wiki file {wiki_path}: {e}",
                 hint="DB rows rolled back via delete_concept; no orphan concept left",
             )
-        result["wiki_path"] = str(wiki_path)
+        result["wiki_path"] = str(wiki_path) if wiki_path else None
         # 自动 export index
         export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
