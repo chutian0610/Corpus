@@ -43,44 +43,147 @@ META_DIR = ".wiki-meta"
 CORPUS_DB = "corpus.db"
 
 
-def _ensure_git_repo(vault_root: Path) -> dict[str, Any]:
-    """在 vault_root 跑 'git init' (幂等). 返回 {'git_initialized', 'git_path'}.
+_INITIAL_GITIGNORE = """# corpus-bot vault runtime data (SQLite + git history)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.wiki-meta/corpus.db
+.wiki-meta/corpus.db-journal
+.wiki-meta/corpus.db-wal
+.wiki-meta/corpus.db-shm
+"""
+
+_GITKEEP_REL_PATHS = ("raw", "wiki/concept", "wiki/index")
+
+
+def _initial_git_commit(vault_root: Path) -> dict[str, Any]:
+    """在已 git init 的 vault 里写 initial commit.
+
+    步骤:
+    1. 写 vault 根 .gitignore (排除 *.db 等运行时数据)
+    2. 给空目录 raw/ wiki/concept/ wiki/index/ 加 .gitkeep (git 不 track 空目录)
+    3. git config user.email/user.name (local only, 避免 commit 失败)
+    4. git add -A && git commit -m 'chore: init corpus vault'
+
+    返回 {committed: True, commit_sha: str, files_committed: int}.
+    """
+    import subprocess
+    from .errors import StorageError
+
+    # 1. .gitignore
+    gitignore_path = vault_root / ".gitignore"
+    if not gitignore_path.exists():
+        gitignore_path.write_text(_INITIAL_GITIGNORE, encoding="utf-8")
+
+    # 2. .gitkeep 占位
+    for rel in _GITKEEP_REL_PATHS:
+        keep = vault_root / rel / ".gitkeep"
+        keep.parent.mkdir(parents=True, exist_ok=True)
+        if not keep.exists():
+            keep.write_text("", encoding="utf-8")
+
+    # 3. local user.email / user.name (git commit 必需)
+    try:
+        for cfg in (
+            ["config", "user.email", "corpus@localhost"],
+            ["config", "user.name", "corpus"],
+        ):
+            subprocess.run(
+                ["git", "-C", str(vault_root)] + cfg,
+                capture_output=True, text=True, timeout=5, check=True,
+            )
+    except subprocess.CalledProcessError as e:
+        raise StorageError(f"git config failed: {e.stderr}") from e
+
+    # 4. add + commit
+    try:
+        add_result = subprocess.run(
+            ["git", "-C", str(vault_root), "add", "-A"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        commit_result = subprocess.run(
+            ["git", "-C", str(vault_root), "commit",
+             "-m", "chore: init corpus vault",
+             "--no-gpg-sign"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise StorageError(f"git commit timed out: {e}") from e
+    except subprocess.CalledProcessError as e:
+        raise StorageError(f"git add failed: {e.stderr}") from e
+
+    if commit_result.returncode != 0:
+        # 空 commit (比如 .gitignore 已存在且无新文件) 不算错
+        if "nothing to commit" in commit_result.stdout.lower():
+            return {"committed": False, "reason": "nothing to commit"}
+        raise StorageError(
+            f"git commit failed (rc={commit_result.returncode}): {commit_result.stderr.strip()}"
+        )
+
+    # 拿 commit SHA
+    sha_result = subprocess.run(
+        ["git", "-C", str(vault_root), "rev-parse", "HEAD"],
+        capture_output=True, text=True, timeout=5,
+    )
+    sha = sha_result.stdout.strip() if sha_result.returncode == 0 else None
+
+    return {
+        "committed": True,
+        "commit_sha": sha,
+        "commit_message": "chore: init corpus vault",
+    }
+
+
+def _ensure_git_repo(
+    vault_root: Path,
+    *,
+    auto_commit: bool = True,
+) -> dict[str, Any]:
+    """在 vault_root 跑 'git init' (幂等) + 可选 initial commit. 返回 git 操作结果.
 
     - vault_root/.git/ 已存在 → 不重复 init, 返回 'git_initialized': False
     - git 不在 PATH → 返回 {'git_initialized': False, 'reason': 'git not in PATH'}
     - 其它 git 错误 → raise StorageError (vault init 失败, 不算 vault 的错)
+    - auto_commit=True (默认) → 写 .gitignore / .gitkeep 占位 + initial commit
     """
     import shutil
     import subprocess
     from .errors import StorageError
 
     if not shutil.which("git"):
-        return {"git_initialized": False, "reason": "git not in PATH"}
+        return {"git_initialized": False, "reason": "git not in PATH", "commit": None}
 
     git_dir = vault_root / ".git"
-    if git_dir.exists():
-        return {"git_initialized": False, "reason": "already a git repository"}
+    already_repo = git_dir.exists()
+    if not already_repo:
+        try:
+            result = subprocess.run(
+                ["git", "init", "--initial-branch=main", str(vault_root)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise StorageError(f"git init timed out: {e}") from e
+        except OSError as e:
+            raise StorageError(f"git init failed: {e}") from e
 
-    try:
-        result = subprocess.run(
-            ["git", "init", "--initial-branch=main", str(vault_root)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise StorageError(f"git init timed out: {e}") from e
-    except OSError as e:
-        raise StorageError(f"git init failed: {e}") from e
+        if result.returncode != 0:
+            raise StorageError(
+                f"git init failed (rc={result.returncode}): {result.stderr.strip()}"
+            )
 
-    if result.returncode != 0:
-        raise StorageError(
-            f"git init failed (rc={result.returncode}): {result.stderr.strip()}"
-        )
+    # initial commit (默认)
+    commit_info = None
+    if auto_commit:
+        commit_info = _initial_git_commit(vault_root)
 
     return {
-        "git_initialized": True,
+        "git_initialized": not already_repo,
         "git_path": str(git_dir),
+        "commit": commit_info,
+        "reason": None if not already_repo else "already a git repository",
     }
 
 

@@ -161,3 +161,42 @@ def test_vault_init_no_git_flag(vault: Path):
     assert parsed["git"]["git_initialized"] is False
     assert "--no-git" in parsed["git"]["reason"]
     assert not (new_vault / ".git").exists()
+
+
+def test_vault_init_initial_commit(vault: Path):
+    """vault init 默认 initial commit, .gitignore + .gitkeep + corpus.db (被 gitignore)."""
+    import subprocess
+    from click.testing import CliRunner
+    from corpus.cli import cli
+
+    new_vault = vault.parent / "new-vault-commit"
+    res = CliRunner().invoke(cli, ["vault", "init", str(new_vault), "--json"])
+    assert res.exit_code == 0, res.stderr
+    parsed = json.loads(res.output)
+
+    # git 信息
+    assert parsed["git"]["git_initialized"] is True
+    commit = parsed["git"]["commit"]
+    assert commit["committed"] is True
+    assert commit["commit_sha"]  # 应该是 40-char hex
+    assert commit["commit_message"] == "chore: init corpus vault"
+
+    # .gitignore 存在且排除 *.db
+    gi = (new_vault / ".gitignore").read_text()
+    assert "*.db" in gi
+    assert ".wiki-meta/corpus.db" in gi
+
+    # raw/ / wiki/concept/ / wiki/index/ 都有 .gitkeep
+    for sub in ("raw", "wiki/concept", "wiki/index"):
+        assert (new_vault / sub / ".gitkeep").exists()
+
+    # corpus.db 不在 commit 里 (被 gitignore 排除)
+    log = subprocess.run(
+        ["git", "-C", str(new_vault), "log", "--name-only", "--pretty=format:"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    committed_files = [f for f in log.split("\n") if f]
+    assert ".gitignore" in committed_files
+    assert "raw/.gitkeep" in committed_files
+    assert ".wiki-meta/corpus.db" not in committed_files
+    assert ".wiki-meta/.gitignore" in committed_files  # .wiki-meta/ 内的 .gitignore 排除 *.db

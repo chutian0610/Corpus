@@ -31,7 +31,7 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 
 ```bash
 # 1. 初始化 vault (一次性, 触发 corpus-init skill)
-#    默认 git init, vault 是独立 git 仓库
+#    默认 git init + initial commit, vault 是独立 git 仓库
 
 # 2. 落源（content-hash dedup，所有 ingest 都加 `-ingest-<UTC compact ISO>` 后缀；软删复活用 --force-revive）
 corpus sources ingest ~/my-wiki ~/notes/postgresql.md

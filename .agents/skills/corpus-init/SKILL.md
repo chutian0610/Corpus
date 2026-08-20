@@ -55,7 +55,17 @@ corpus vault init <vault_name> --json
 
 Idempotent. Running on an existing vault returns schema info without errors. The vault root is created if missing (`mkdir -p` semantics).
 
-**默认同时跑 `git init --initial-branch=main`**, vault 是独立 git 仓库 (wiki/concept/*.md 可被 git 跟踪). 加 `--no-git` 跳过. vault 里 `.wiki-meta/corpus.db` 是 SQLite 运行时数据, 建议 commit 一个 `.gitignore` 把 `*.db` / `.wiki-meta/corpus.db*` 排除.
+**默认同时跑 `git init --initial-branch=main` + initial commit**:
+- 写 vault 根 `.gitignore` 排除 `*.db` / `.wiki-meta/corpus.db*` (SQLite 运行时数据不入 git)
+- 给 `raw/` / `wiki/concept/` / `wiki/index/` 加 `.gitkeep` 占位 (git 不 track 空目录)
+- `git -C <vault> config user.email/user.name` (local only, 设为 `corpus@localhost` / `corpus`)
+- `git add -A && git commit -m 'chore: init corpus vault'`
+
+跳过选项:
+- `--no-git` — 连 git init 都不要
+- `--no-git-commit` — git init 但不 initial commit (用户/agent 自己 commit 后续)
+
+返回 JSON `git.commit.commit_sha` 字段有 commit SHA (40-hex), 可用于后续 `git reset` 等.
 
 Returns JSON:
 
@@ -69,7 +79,8 @@ Returns JSON:
   "meta": "<path>/.wiki-meta",
   "corpus_db": "<path>/.wiki-meta/corpus.db",
   "schema_version": 2,
-  "git": {"git_initialized": true, "git_path": "<path>/.git"}
+  "git": {"git_initialized": true, "git_path": "<path>/.git",
+           "commit": {"committed": true, "commit_sha": "abc...", "commit_message": "chore: init corpus vault"}}
 }
 ```
 
