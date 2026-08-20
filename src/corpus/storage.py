@@ -803,6 +803,206 @@ def _raw_path(vault_root: Path, source_id: str) -> Path:
     return None
 
 
+def restore_from_files(vault_root: Path, *, dry_run: bool = False) -> dict[str, Any]:
+    """从 git 仓库 (raw/ + wiki/concept/ + wiki/source/) 重建整个 DB.
+
+    适用场景: 换电脑 (git clone vault repo) / .wiki-meta/corpus.db 损坏 / 跨平台迁移.
+    不会改 git tracked 的 markdown 文件, 只重写 .wiki-meta/corpus.db.
+
+    流程:
+      1. 读 wiki/concept/<slug>.md frontmatter -> INSERT/UPDATE concepts
+      2. 读 wiki/concept/<slug>.md body 的 [[wikilinks]] -> INSERT links
+      3. 读 raw/<file>-ingest-...md frontmatter -> INSERT/UPDATE sources
+      4. 读 wiki/concept/<slug>.md frontmatter 的 sources: 数组 -> INSERT extractions
+
+    dry_run=True 时只统计不写 DB.
+
+    返回 {sources, concepts, links, extractions} 计数.
+    """
+    # 跨电脑恢复时 corpus.db 可能还没 init, 自动 init
+    db_path = vault_root / ".wiki-meta" / "corpus.db"
+    if not dry_run and not is_initialized(db_path):
+        init_db(db_path)
+    from .ids import slugify
+    from datetime import datetime, timezone
+    summary = {"sources": 0, "concepts": 0, "links": 0, "extractions": 0, "skipped": 0}
+
+    # 1+2) concepts + links
+    concept_dir = vault_root / "wiki" / "concept"
+    if concept_dir.exists():
+        for path in sorted(concept_dir.glob("*.md")):
+            meta, body = _read_md(path)
+            slug = meta.get("slug") or path.stem
+            if not dry_run:
+                with write_with_retry(vault_root / ".wiki-meta" / "corpus.db") as conn:
+                    _upsert_concept_from_meta(conn, slug, meta, body)
+                    # 收集 wikilinks from body
+                    import re
+                    for m in re.finditer(r"\[\[([^\]|\+]+?)\]\]", body):
+                        link_slug = slugify(m.group(1).split("|")[0])
+                        if link_slug != slug:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO links (from_slug, to_slug) VALUES (?, ?)",
+                                (slug, link_slug),
+                            )
+                            summary["links"] += 1
+            summary["concepts"] += 1
+
+    # 3) sources
+    raw_dir = vault_root / "raw"
+    if raw_dir.exists():
+        for path in sorted(raw_dir.glob("*.md")):
+            if path.name.startswith("."):
+                continue  # .tmp/ .gitkeep
+            meta, _body = _read_md(path)
+            sid = meta.get("source_id")
+            if not sid:
+                continue  # 老 plain markdown 没 frontmatter, 跳过
+            if not dry_run:
+                with write_with_retry(vault_root / ".wiki-meta" / "corpus.db") as conn:
+                    _upsert_source_from_meta(conn, sid, path, meta)
+            summary["sources"] += 1
+
+    # 4) extractions (从 wiki/concept/<slug>.md frontmatter 的 sources: 数组读)
+    #    但我们 frontmatter 存 source_ids (sid list) 而非 quote_span, 所以 extractions 缺 quote_span.
+    #    改进: sources: [{source_id, quote_span, confidence, prompt_version}] 嵌套对象
+    if concept_dir.exists() and not dry_run:
+        with write_with_retry(vault_root / ".wiki-meta" / "corpus.db") as conn:
+            for path in sorted(concept_dir.glob("*.md")):
+                meta, _body = _read_md(path)
+                slug = meta.get("slug") or path.stem
+                sources = meta.get("sources") or []
+                for src_entry in sources:
+                    if isinstance(src_entry, str):
+                        # 旧格式: sources: [sid1, sid2, ...]
+                        sid = src_entry
+                        quote_span = None
+                        confidence = None
+                        prompt_version = None
+                    elif isinstance(src_entry, dict):
+                        # 新格式: sources: [{source_id, quote_span, confidence, prompt_version}]
+                        sid = src_entry.get("source_id")
+                        quote_span = src_entry.get("quote_span")
+                        confidence = src_entry.get("confidence")
+                        prompt_version = src_entry.get("prompt_version")
+                    else:
+                        continue
+                    if not sid:
+                        continue
+                    # source_content_hash 查 DB
+                    row = conn.execute(
+                        "SELECT content_hash FROM sources WHERE source_id=?", (sid,),
+                    ).fetchone()
+                    src_hash = row["content_hash"] if row else None
+                    now = _utc_now_iso()
+                    conn.execute(
+                        """INSERT INTO extractions
+                        (extraction_id, source_id, concept_slug, quote_span, char_start, char_end,
+                         extracted_at, extracted_by, prompt_version, confidence, source_content_hash)
+                        VALUES (?, ?, ?, ?, NULL, NULL, ?, 'restore', ?, ?, ?)""",
+                        (
+                            _new_uuid12("e_"), sid, slug, quote_span,
+                            now, prompt_version, confidence, src_hash,
+                        ),
+                    )
+                    summary["extractions"] += 1
+
+    return summary
+
+
+def _upsert_concept_from_meta(conn, slug: str, meta: dict, body: str) -> None:
+    """从 frontmatter meta 写 concepts 行 (INSERT 或 UPDATE)."""
+    source_ids = list(meta.get("source_ids") or [])
+    links = list(meta.get("links") or [])
+    aliases = list(meta.get("aliases") or [])
+    tags = list(meta.get("tags") or [])
+    certified_issues = list(meta.get("certified_issues") or [])
+    certified_suggestions = list(meta.get("certified_suggestions") or [])
+    try:
+        conn.execute(
+            """INSERT INTO concepts
+            (concept_id, slug, title, body, source_ids, links, created_at, updated_at,
+             is_orphan, version, certified_at, certified_score, certified_issues,
+             certified_suggestions, certified_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                _new_uuid12("c_"),
+                slug,
+                meta.get("title", slug),
+                body,
+                json.dumps(source_ids),
+                json.dumps(links),
+                meta.get("created_at") or _utc_now_iso(),
+                meta.get("updated_at") or _utc_now_iso(),
+                0 if source_ids else 1,  # is_orphan
+                meta.get("version", 0),
+                meta.get("certified_at"),
+                meta.get("certified_score"),
+                json.dumps(certified_issues) if certified_issues else None,
+                json.dumps(certified_suggestions) if certified_suggestions else None,
+                meta.get("certified_by"),
+            ),
+        )
+    except sqlite3.IntegrityError:
+        # slug 已存在 → UPDATE
+        conn.execute(
+            """UPDATE concepts
+            SET title=?, body=?, source_ids=?, links=?, updated_at=?, is_orphan=?,
+                version=?, certified_at=?, certified_score=?,
+                certified_issues=?, certified_suggestions=?, certified_by=?
+            WHERE slug=?""",
+            (
+                meta.get("title", slug), body,
+                json.dumps(source_ids), json.dumps(links),
+                meta.get("updated_at") or _utc_now_iso(),
+                0 if source_ids else 1,
+                meta.get("version", 0),
+                meta.get("certified_at"),
+                meta.get("certified_score"),
+                json.dumps(certified_issues) if certified_issues else None,
+                json.dumps(certified_suggestions) if certified_suggestions else None,
+                meta.get("certified_by"),
+                slug,
+            ),
+        )
+
+
+def _upsert_source_from_meta(conn, sid: str, raw_path: Path, meta: dict) -> None:
+    """从 frontmatter meta 写 sources 行."""
+    try:
+        conn.execute(
+            """INSERT INTO sources
+            (source_id, raw_path, original_filename, size_bytes, content_hash, status,
+             created_at, committed_at, deleted_at, deleted_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)""",
+            (
+                sid,
+                str(raw_path),
+                meta.get("original_filename", raw_path.name),
+                meta.get("size_bytes", raw_path.stat().st_size),
+                meta.get("content_hash", ""),
+                meta.get("status", "staged"),
+                meta.get("created_at") or _utc_now_iso(),
+            ),
+        )
+    except sqlite3.IntegrityError:
+        conn.execute(
+            """UPDATE sources
+            SET raw_path=?, original_filename=?, size_bytes=?, content_hash=?, status=?,
+                created_at=?
+            WHERE source_id=?""",
+            (
+                str(raw_path),
+                meta.get("original_filename", raw_path.name),
+                meta.get("size_bytes", raw_path.stat().st_size),
+                meta.get("content_hash", ""),
+                meta.get("status", "staged"),
+                meta.get("created_at") or _utc_now_iso(),
+                sid,
+            ),
+        )
+
+
 def write_concept_file(
     vault_root: Path,
     *,

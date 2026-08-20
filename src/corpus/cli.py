@@ -27,6 +27,7 @@ from .storage import (
     write_concept_file,
     write_source_wiki_page,
     update_source_page_concepts,
+    restore_from_files,
     write_source_file,
     certification_stats,
     commit_source,
@@ -448,6 +449,37 @@ def sources_batch(
         as_json=as_json,
     )
 
+
+@cli.command(name="restore-from-files")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.option("--dry-run", is_flag=True, help="只统计, 不写 DB (preview)")
+@click.option("--json", "as_json", is_flag=True)
+def cli_restore_from_files(
+    vault_path: Path, dry_run: bool, as_json: bool,
+) -> None:
+    """从 raw/ + wiki/concept/ + wiki/source/ 重建整个 DB (sources/concepts/links/extractions).
+
+    适用: 换电脑 (git clone vault repo) / .wiki-meta/corpus.db 损坏 / 跨平台迁移.
+    流程:
+      1. 读 wiki/concept/<slug>.md frontmatter -> INSERT/UPDATE concepts
+      2. 读 wiki/concept/<slug>.md body 的 [[wikilinks]] -> INSERT links
+      3. 读 raw/<file>-ingest-...md frontmatter (source_id/content_hash) -> INSERT/UPDATE sources
+      4. 读 wiki/concept/<slug>.md frontmatter 的 sources: 数组 -> INSERT extractions
+
+    不会改 git tracked 的 markdown 文件, 只重写 .wiki-meta/corpus.db.
+    """
+    paths = _resolve_db(vault_path)
+    summary = restore_from_files(paths["root"], dry_run=dry_run)
+    if as_json:
+        _emit({"dry_run": dry_run, **summary}, as_json=True)
+        return
+    prefix = "[DRY-RUN] " if dry_run else ""
+    click.echo(f"{prefix}restore-from-files 统计:")
+    for k, v in summary.items():
+        click.echo(f"  {k}: {v}")
+    if dry_run:
+        click.echo("")
+        click.echo("去掉 --dry-run 实际跑一次.")
 
 @cli.command(name="audit")
 @click.argument("vault_path", type=click.Path(path_type=Path))

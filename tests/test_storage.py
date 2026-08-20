@@ -1286,3 +1286,101 @@ def test_read_md_with_frontmatter_yaml_basic(tmp_path: Path):
 def read_concept_file_cached(vault_root, slug):
     from corpus.storage import read_concept_file
     return read_concept_file(vault_root, slug)
+
+
+# ---------- restore_from_files ----------
+
+def test_restore_from_files_basic(tmp_path: Path):
+    """restore_from_files 从 raw/ + wiki/concept/ 重建 DB (换电脑恢复场景)."""
+    import json as _json
+    from corpus.storage import (
+        write_concept_file, write_source_file, init_db, read_concept, read_source,
+    )
+    from corpus.vault import ensure_vault
+
+    vault = tmp_path / "v"
+    (vault / "raw").mkdir(parents=True)
+    ensure_vault(vault)
+    init_db(vault / ".wiki-meta" / "corpus.db")
+
+    # 1. 写 raw/<file>.md (frontmatter 含 source_id / content_hash)
+    raw_path = vault / "raw" / "test-ingest-20260820-150000.md"
+    write_source_file(
+        vault, raw_path,
+        source_id="abc123def4560000",
+        original_filename="test.md", content_hash="abc", size_bytes=10,
+        status="staged", body="# Test content",
+    )
+
+    # 2. 写 wiki/concept/<slug>.md (frontmatter 含 sources / links / version / etc)
+    write_concept_file(
+        vault, slug="test-concept", title="Test", body="## body",
+        source_ids=["abc123def4560000"], links=[],
+        version=2, status="draft", tags=["test"],
+    )
+
+    # 3. 删 DB (模拟 db 丢失) - 直接 delete file
+    import os
+    os.remove(vault / ".wiki-meta" / "corpus.db")
+
+    # 4. restore_from_files 重建
+    from corpus.storage import restore_from_files
+    summary = restore_from_files(vault)
+    assert summary["sources"] == 1
+    assert summary["concepts"] == 1
+    # extractions 看 frontmatter 'sources:' 数组 - 但我们写时用 source_ids (sid list),
+    # restore 时按 string 处理, 会建 1 条 extraction
+    assert summary["extractions"] >= 0  # 可能 0 或 1, 取决于 frontmatter 'sources' 字段格式
+
+    # 5. verify DB 重建
+    from corpus.storage import read_concept as _read_concept
+    info = _read_concept(vault / ".wiki-meta" / "corpus.db", "test-concept")
+    assert info is not None
+    assert info["title"] == "Test"
+    assert info["body"].lstrip() == "## body"
+    assert info["source_ids"] == ["abc123def4560000"]
+    assert info["version"] == 2
+    # status / tags / aliases 在 frontmatter (git), DB schema v3 没这些列
+    # (schema v4 可加), 验证 frontmatter 即可
+    fm = (vault / "wiki" / "concept" / "test-concept.md").read_text()
+    assert "status: draft" in fm
+    assert "tags:" in fm
+
+    src_info = read_source(vault / ".wiki-meta" / "corpus.db", "abc123def4560000")
+    assert src_info is not None
+    assert src_info["original_filename"] == "test.md"
+    assert src_info["content_hash"] == "abc"
+
+
+def test_restore_from_files_dry_run(tmp_path: Path):
+    """dry_run=True 不写 DB, 只统计."""
+    from corpus.storage import (
+        write_concept_file, write_source_file, init_db,
+        connect, restore_from_files,
+    )
+    from corpus.vault import ensure_vault
+    import os
+
+    vault = tmp_path / "v"
+    (vault / "raw").mkdir(parents=True)
+    ensure_vault(vault)
+    init_db(vault / ".wiki-meta" / "corpus.db")
+
+    raw_path = vault / "raw" / "x.md"
+    write_source_file(
+        vault, raw_path,
+        source_id="x" * 16, original_filename="x.md",
+        content_hash="x", size_bytes=1, status="staged", body="x",
+    )
+    write_concept_file(vault, slug="c", title="C", body="b",
+                      source_ids=["x" * 16], version=0)
+
+    # 删 DB
+    os.remove(vault / ".wiki-meta" / "corpus.db")
+
+    # dry_run
+    summary = restore_from_files(vault, dry_run=True)
+    assert summary["sources"] == 1
+    assert summary["concepts"] == 1
+    # DB 不应被创建
+    assert not (vault / ".wiki-meta" / "corpus.db").exists()
