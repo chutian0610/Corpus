@@ -655,11 +655,18 @@ def concepts() -> None:
               help='JSON array: [{"source_id":"abc","quote_span":"..."}, ...]')
 @click.option("--prompt-version", default=None)
 @click.option("--links", "links", default="", help="逗号分隔的 wikilink slug 列表")
+@click.option("--status", default="draft",
+              help="concept 生命周期 (draft / evergreen / stale)")
+@click.option("--aliases", default="",
+              help="逗号分隔的别名 (find-by-link 备用, 例 'MVCC,多版本并发')")
+@click.option("--tags", default="",
+              help="逗号分隔的 tags (概念分类, 例 'concept,database')")
 @click.option("--json", "as_json", is_flag=True)
 def concepts_write(
     vault_path: Path, slug: str, title: str, body: str,
     extractions_json: str, prompt_version: str | None,
-    links: str, as_json: bool,
+    links: str, status: str, aliases: str, tags: str,
+    as_json: bool,
 ) -> None:
     """写一篇 wiki concept。slug 已存在 → ConflictError。
 
@@ -674,6 +681,8 @@ def concepts_write(
         _err("--extractions 必须是 JSON array")
 
     link_list = [s.strip() for s in links.split(",") if s.strip()]
+    alias_list = [s.strip() for s in aliases.split(",") if s.strip()] if aliases else None
+    tag_list = [s.strip() for s in tags.split(",") if s.strip()] if tags else None
 
     try:
         result = write_concept(
@@ -682,6 +691,9 @@ def concepts_write(
             extractions_data=extractions_data,
             links=link_list,
             prompt_version=prompt_version,
+            status=status,
+            aliases=alias_list,
+            tags=tag_list,
         )
         # 物理写文件 (失败需回滚 DB, 避免概念存在但 wiki 文件缺的不一致)
         # frontmatter 含全部 metadata (slug/title/source_ids/links/version/created_at/updated_at/...)
@@ -717,6 +729,7 @@ def concepts_write(
 @click.argument("slug")
 @click.option("--title", default=None, help="新标题 (省略则不改)")
 @click.option("--body", default=None, help="新正文 (省略则不改)")
+@click.option("--status", default=None, help="新 status (省略则不改)")
 @click.option("--add-extractions", "add_extractions_json", default=None,
               help='JSON array: [{"source_id":"...","quote_span":"..."}, ...] (增量加 extractions, 必填 quote_span)')
 @click.option("--add-links", "add_links", default="", help="逗号分隔 wikilink slugs (slug-safe, 拒绝自引用)")
@@ -727,7 +740,7 @@ def concepts_write(
 @click.option("--json", "as_json", is_flag=True)
 def concepts_update(
     vault_path: Path, slug: str,
-    title: str | None, body: str | None,
+    title: str | None, body: str | None, status: str | None,
     add_extractions_json: str | None, add_links: str,
     prompt_version: str | None, expected_version: int | None,
     as_json: bool,
@@ -766,6 +779,7 @@ def concepts_update(
             add_links=link_list,
             prompt_version=prompt_version,
             expected_version=expected_version,
+            status=status,
         )
         # 物理写文件 (DB 已更新, 同步 frontmatter 反映最新 metadata)
         if body is not None or title is not None or add_extractions is not None or link_list is not None:

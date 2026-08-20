@@ -475,7 +475,7 @@ def test_stage_source_active_duplicate_still_rejected(db: Path):
 
 # ---------- init_db migration v1 -> v2 ----------
 
-def test_init_db_upgrades_v1_to_v4(tmp_path: Path):
+def test_init_db_upgrades_v1_to_v5(tmp_path: Path):
     """模拟老库 (v1 DDL) → init_db 升级到 v4 (经过 v2 + v3 + v4 migration chain)."""
     import sqlite3
 
@@ -522,7 +522,7 @@ def test_init_db_upgrades_v1_to_v4(tmp_path: Path):
         rows = c.execute("SELECT * FROM sources").fetchall()
         assert len(rows) == 2
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver["value"]) == 4
+        assert int(ver["value"]) == 5
         # 索引存在
         idx = c.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sources_content_hash'"
@@ -530,16 +530,16 @@ def test_init_db_upgrades_v1_to_v4(tmp_path: Path):
         assert idx is not None
 
 
-def test_init_db_idempotent_on_v4(tmp_path: Path):
-    """已 v4 的库 init_db 多次也幂等, version 不漂."""
-    db_path = tmp_path / "v4.db"
+def test_init_db_idempotent_on_v5(tmp_path: Path):
+    """已 v5 的库 init_db 多次也幂等, version 不漂."""
+    db_path = tmp_path / "v5.db"
     init_db(db_path)
     init_db(db_path)
     init_db(db_path)
     import sqlite3
     with sqlite3.connect(str(db_path)) as c:
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver[0]) == 4
+        assert int(ver[0]) == 5
 
 
 # ---------- delete_concept ----------
@@ -1097,6 +1097,64 @@ def test_migration_v3_to_v4_adds_ingest_log(tmp_path: Path):
     """)
     conn.commit(); conn.close()
 
+
+
+def test_migration_v4_to_v5_adds_status_aliases_tags(tmp_path: Path):
+    """v4 库 init_db 应自动 migration v4 -> v5, 加 status/aliases/tags 列."""
+    import sqlite3
+    db_path = tmp_path / "legacy_v4.db"
+    conn = sqlite3.connect(str(db_path))
+    # v4 schema (有 ingest_log 但无 status/aliases/tags)
+    conn.executescript("""
+        CREATE TABLE sources (
+            source_id TEXT PRIMARY KEY, raw_path TEXT NOT NULL, original_filename TEXT,
+            size_bytes INTEGER NOT NULL, content_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'staged',
+            created_at TEXT NOT NULL, committed_at TEXT, deleted_at TEXT, deleted_reason TEXT
+        );
+        CREATE TABLE concepts (
+            concept_id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
+            body TEXT NOT NULL, source_ids TEXT NOT NULL DEFAULT '[]',
+            links TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            is_orphan INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0,
+            certified_at TEXT, certified_score REAL, certified_issues TEXT,
+            certified_suggestions TEXT, certified_by TEXT
+        );
+        CREATE TABLE extractions (
+            extraction_id TEXT PRIMARY KEY, source_id TEXT NOT NULL,
+            concept_slug TEXT NOT NULL, quote_span TEXT, char_start INTEGER,
+            char_end INTEGER, extracted_at TEXT NOT NULL, extracted_by TEXT NOT NULL,
+            prompt_version TEXT, confidence REAL, source_content_hash TEXT NOT NULL
+        );
+        CREATE TABLE links (from_slug TEXT NOT NULL, to_slug TEXT NOT NULL,
+            PRIMARY KEY (from_slug, to_slug));
+        CREATE TABLE cooccurrence (slug_a TEXT NOT NULL, slug_b TEXT NOT NULL,
+            weight INTEGER NOT NULL DEFAULT 1, last_seen TEXT NOT NULL,
+            PRIMARY KEY (slug_a, slug_b), CHECK (slug_a < slug_b));
+        CREATE TABLE certification_log (concept_id TEXT NOT NULL, certified_at TEXT NOT NULL,
+            score REAL NOT NULL, issues TEXT, suggestions TEXT, certified_by TEXT NOT NULL,
+            PRIMARY KEY (concept_id, certified_at));
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE ingest_log (id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL,
+            source_id TEXT, source_path TEXT, actor TEXT NOT NULL,
+            started_at TEXT NOT NULL, ended_at TEXT, status TEXT NOT NULL,
+            details TEXT, source_content_hash TEXT);
+        INSERT INTO schema_meta (key, value) VALUES ('schema_version', '4');
+    """)
+    conn.commit(); conn.close()
+
+    from corpus.storage import init_db
+    init_db(db_path)
+
+    with sqlite3.connect(str(db_path)) as c:
+        ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+        assert int(ver[0]) == 5
+        # v5 新列存在
+        cols = [r[1] for r in c.execute("PRAGMA table_info(concepts)").fetchall()]
+        assert "status" in cols
+        assert "aliases" in cols
+        assert "tags" in cols
     # 跑 init_db 升级
     from corpus.storage import init_db, log_ingest
     init_db(db_path)
@@ -1104,7 +1162,7 @@ def test_migration_v3_to_v4_adds_ingest_log(tmp_path: Path):
     # 验 schema_version 升到 4
     with sqlite3.connect(str(db_path)) as c:
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver[0]) == 4
+        assert int(ver[0]) == 5
         # ingest_log 表存在
         log_ingest(db_path, op="stage", source_id="post-mig", actor="test", status="ok")
         c.row_factory = sqlite3.Row
@@ -1384,3 +1442,65 @@ def test_restore_from_files_dry_run(tmp_path: Path):
     assert summary["concepts"] == 1
     # DB 不应被创建
     assert not (vault / ".wiki-meta" / "corpus.db").exists()
+
+
+# ---------- schema v5: status / aliases / tags ----------
+
+def test_write_concept_status_aliases_tags_roundtrip(db: Path, staged_source: str):
+    """write_concept 接受 status/aliases/tags, 写 DB + read 返回."""
+    from corpus.storage import write_concept, read_concept
+    res = write_concept(
+        db, slug="x", title="X", body="b",
+        extractions_data=[_make_extraction(staged_source)],
+        links=[],
+        status="evergreen",
+        aliases=["MVCC", "多版本并发"],
+        tags=["concept", "database"],
+    )
+    info = read_concept(db, "x")
+    assert info["status"] == "evergreen"
+    assert info["aliases"] == ["MVCC", "多版本并发"]
+    assert info["tags"] == ["concept", "database"]
+
+
+def test_write_concept_default_status_draft(db: Path, staged_source: str):
+    """不传 status 默认 'draft'."""
+    from corpus.storage import write_concept, read_concept
+    write_concept(
+        db, slug="x", title="X", body="b",
+        extractions_data=[_make_extraction(staged_source)],
+        links=[],
+    )
+    info = read_concept(db, "x")
+    assert info["status"] == "draft"
+    assert info["aliases"] == []
+    assert info["tags"] == []
+
+
+def test_restore_from_files_v4_to_v5_picks_up_status_aliases_tags(tmp_path: Path):
+    """restore_from_files 从 frontmatter 读 status/aliases/tags 写进 DB (v5)."""
+    from corpus.storage import (
+        write_concept_file, init_db, restore_from_files, read_concept,
+    )
+    from corpus.vault import ensure_vault
+    import os
+
+    vault = tmp_path / "v"
+    (vault / "raw").mkdir(parents=True)
+    ensure_vault(vault)
+    init_db(vault / ".wiki-meta" / "corpus.db")
+
+    write_concept_file(
+        vault, slug="c", title="C", body="b",
+        source_ids=[], links=[],
+        status="evergreen", aliases=["alias1"], tags=["t1", "t2"],
+    )
+
+    # 删 db, restore
+    os.remove(vault / ".wiki-meta" / "corpus.db")
+    summary = restore_from_files(vault)
+    assert summary["concepts"] == 1
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "c")
+    assert info["status"] == "evergreen"
+    assert info["aliases"] == ["alias1"]
+    assert info["tags"] == ["t1", "t2"]

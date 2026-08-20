@@ -37,13 +37,14 @@ from .frontmatter import (
     write_md_with_frontmatter as _write_md,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Migration 步骤表: key=(from_v, to_v), value=函数(conn)
 _MIGRATIONS: dict[tuple[int, int], str] = {
     (1, 2): "_migrate_1_to_2",
     (2, 3): "_migrate_2_to_3",
     (3, 4): "_migrate_3_to_4",
+    (4, 5): "_migrate_4_to_5",
 }
 
 def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
@@ -155,6 +156,9 @@ CREATE TABLE IF NOT EXISTS concepts (
     updated_at TEXT NOT NULL,
     is_orphan INTEGER NOT NULL DEFAULT 0,    -- 1 = source_ids 为空
     version INTEGER NOT NULL DEFAULT 0,      -- 乐观锁: 每次 update +1, CAS 用来 detect concurrent modification
+    status TEXT NOT NULL DEFAULT 'draft',   -- concept 生命周期: draft / evergreen / stale (schema v5)
+    aliases TEXT NOT NULL DEFAULT '[]',     -- JSON array, find-by-link 备用: ['MVCC', '多版本并发'] (schema v5)
+    tags TEXT NOT NULL DEFAULT '[]',        -- JSON array, 概念分类: ['concept', 'database'] (schema v5)
     -- certification fields
     certified_at TEXT,
     certified_score REAL,
@@ -262,6 +266,59 @@ def _migrate_3_to_4(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_ingest_log_op ON ingest_log(op);
         """
     )
+
+
+
+def _migrate_4_to_5(conn: sqlite3.Connection) -> None:
+    """v4 -> v5: concepts 表加 status / aliases / tags 列.
+
+    status:  概念生命周期 (draft / evergreen / stale).
+    aliases: JSON array, find-by-link 备用 (e.g. 'MVCC' -> postgresql-mvcc).
+    tags:    JSON array, 概念分类 (e.g. ['concept', 'database']).
+
+    SQLite 没 ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT 0 (没值),
+    标准 rename + recreate.
+    """
+    conn.executescript(
+        """
+        ALTER TABLE concepts RENAME TO concepts__v4;
+        CREATE TABLE concepts (
+            concept_id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            source_ids TEXT NOT NULL DEFAULT '[]',
+            links TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            is_orphan INTEGER NOT NULL DEFAULT 0,
+            version INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'draft',
+            aliases TEXT NOT NULL DEFAULT '[]',
+            tags TEXT NOT NULL DEFAULT '[]',
+            certified_at TEXT,
+            certified_score REAL,
+            certified_issues TEXT,
+            certified_suggestions TEXT,
+            certified_by TEXT
+        );
+        INSERT INTO concepts
+            (concept_id, slug, title, body, source_ids, links,
+             created_at, updated_at, is_orphan, version, status, aliases, tags,
+             certified_at, certified_score, certified_issues,
+             certified_suggestions, certified_by)
+            SELECT concept_id, slug, title, body, source_ids, links,
+                   created_at, updated_at, is_orphan, version, 'draft', '[]', '[]',
+                   certified_at, certified_score, certified_issues,
+                   certified_suggestions, certified_by
+            FROM concepts__v4;
+        DROP TABLE concepts__v4;
+        CREATE INDEX IF NOT EXISTS idx_concepts_slug ON concepts(slug);
+        CREATE INDEX IF NOT EXISTS idx_concepts_certified_at ON concepts(certified_at);
+        CREATE INDEX IF NOT EXISTS idx_concepts_is_orphan ON concepts(is_orphan);
+        """
+    )
+
 
 
 def _utc_now_iso() -> str:
@@ -922,9 +979,10 @@ def _upsert_concept_from_meta(conn, slug: str, meta: dict, body: str) -> None:
         conn.execute(
             """INSERT INTO concepts
             (concept_id, slug, title, body, source_ids, links, created_at, updated_at,
-             is_orphan, version, certified_at, certified_score, certified_issues,
+             is_orphan, version, status, aliases, tags,
+             certified_at, certified_score, certified_issues,
              certified_suggestions, certified_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _new_uuid12("c_"),
                 slug,
@@ -936,6 +994,9 @@ def _upsert_concept_from_meta(conn, slug: str, meta: dict, body: str) -> None:
                 meta.get("updated_at") or _utc_now_iso(),
                 0 if source_ids else 1,  # is_orphan
                 meta.get("version", 0),
+                meta.get("status", "draft"),
+                json.dumps(aliases) if aliases else "[]",
+                json.dumps(tags) if tags else "[]",
                 meta.get("certified_at"),
                 meta.get("certified_score"),
                 json.dumps(certified_issues) if certified_issues else None,
@@ -948,7 +1009,8 @@ def _upsert_concept_from_meta(conn, slug: str, meta: dict, body: str) -> None:
         conn.execute(
             """UPDATE concepts
             SET title=?, body=?, source_ids=?, links=?, updated_at=?, is_orphan=?,
-                version=?, certified_at=?, certified_score=?,
+                version=?, status=?, aliases=?, tags=?,
+                certified_at=?, certified_score=?,
                 certified_issues=?, certified_suggestions=?, certified_by=?
             WHERE slug=?""",
             (
@@ -957,6 +1019,9 @@ def _upsert_concept_from_meta(conn, slug: str, meta: dict, body: str) -> None:
                 meta.get("updated_at") or _utc_now_iso(),
                 0 if source_ids else 1,
                 meta.get("version", 0),
+                meta.get("status", "draft"),
+                json.dumps(aliases) if aliases else "[]",
+                json.dumps(tags) if tags else "[]",
                 meta.get("certified_at"),
                 meta.get("certified_score"),
                 json.dumps(certified_issues) if certified_issues else None,
@@ -1217,6 +1282,9 @@ def write_concept(
     links: list[str],
     prompt_version: str | None = None,
     extracted_by: str = "agent",
+    status: str = "draft",
+    aliases: list[str] | None = None,
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """严格 INSERT concept. slug 已存在 → ConflictError (LLM 重新走 dedup + update_concept).
 
@@ -1300,12 +1368,14 @@ def write_concept(
             try:
                 conn.execute(
                     """INSERT INTO concepts
-                    (concept_id, slug, title, body, source_ids, links, created_at, updated_at, is_orphan)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                    (concept_id, slug, title, body, source_ids, links, created_at, updated_at,
+                     is_orphan, status, aliases, tags)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
                     (
                         cid, slug, title, body,
                         json.dumps(source_ids), json.dumps(links),
                         now, now,
+                        status, json.dumps(aliases or []), json.dumps(tags or []),
                     ),
                 )
             except sqlite3.IntegrityError as e:
@@ -1383,6 +1453,7 @@ def update_concept(
     prompt_version: str | None = None,
     extracted_by: str = "agent",
     expected_version: int | None = None,
+    status: str | None = None,
 ) -> dict[str, Any]:
     """增量更新 concept (optimistic concurrency control via version).
 
@@ -1433,6 +1504,9 @@ def update_concept(
             if body is not None:
                 set_parts.append("body=?")
                 params.append(body)
+            if status is not None:
+                set_parts.append("status=?")
+                params.append(status)
             # 每次有改动 version+1 (CAS 自增)
             if set_parts or add_extractions or add_links:
                 set_parts.append("version=version+1")
@@ -1757,6 +1831,12 @@ def read_concept(db_path: Path, slug: str) -> dict[str, Any] | None:
     if out["certified_suggestions"]:
         out["certified_suggestions"] = _parse_json_list(out["certified_suggestions"])
     out["is_orphan"] = bool(out["is_orphan"])
+    if out.get("status"):
+        pass  # already string
+    if out.get("aliases"):
+        out["aliases"] = _parse_json_list(out["aliases"])
+    if out.get("tags"):
+        out["tags"] = _parse_json_list(out["tags"])
     return out
 
 
@@ -1796,6 +1876,10 @@ def list_concepts(
         d["source_ids"] = _parse_json_list(d["source_ids"])
         d["links"] = _parse_json_list(d["links"])
         d["is_orphan"] = bool(d["is_orphan"])
+        if d.get("aliases"):
+            d["aliases"] = _parse_json_list(d["aliases"])
+        if d.get("tags"):
+            d["tags"] = _parse_json_list(d["tags"])
         out.append(d)
     return out
 
