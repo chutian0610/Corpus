@@ -45,3 +45,4 @@ dist/
 
 # corpus-bot 临时 vault（demo 用）
 /tmp/test-corpus-bot*
+uv.lock
