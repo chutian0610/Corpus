@@ -1,4 +1,4 @@
-"""corpus-bot CLI。
+"""corpus CLI。
 
 设计原则：
 - LLM-decoupled: 任何子命令都不调 LLM
@@ -105,7 +105,7 @@ def _humanize_one(item) -> str:
 def _resolve_db(vault_root: Path, *, ensure_vault_dir: bool = True):
     """解析 vault 路径，返回 db_path。"""
     if not vault_root.exists():
-        _err(f"vault does not exist: {vault_root}", hint="run `corpus-bot vault init <path>` first")
+        _err(f"vault does not exist: {vault_root}", hint="run `corpus vault init <path>` first")
     if ensure_vault_dir:
         ensure_vault(vault_root)
     paths = vault_paths(vault_root)
@@ -124,20 +124,20 @@ def _read_file(path: Path) -> str:
 # ---------- top-level group ----------
 
 @click.group()
-@click.version_option(version=__version__, prog_name="corpus-bot")
+@click.version_option(version=__version__, prog_name="corpus")
 def cli() -> None:
-    """corpus-bot: LLM-driven wiki builder (CLI-first, LLM-decoupled).
+    """corpus: LLM-driven wiki builder (CLI-first, LLM-decoupled).
 
     \b
     Quick start:
-      corpus-bot vault init ~/my-wiki
-      corpus-bot sources ingest ~/my-wiki ~/notes/postgresql.md
-      corpus-bot concepts write ~/my-wiki \\
+      corpus vault init ~/my-wiki
+      corpus sources ingest ~/my-wiki ~/notes/postgresql.md
+      corpus concepts write ~/my-wiki \\
         --slug postgres-mvcc --title "PostgreSQL MVCC" \\
         --body "..." --source-ids <sid> --links postgres
-      corpus-bot stats ~/my-wiki
+      corpus stats ~/my-wiki
 
-    LLM 调用（extract / compile / 评分）由 agent 自己做，corpus-bot 不装 LLM。
+    LLM 调用（extract / compile / 评分）由 agent 自己做，corpus 不装 LLM。
     """
 
 
@@ -460,7 +460,7 @@ cli.add_command(vault_stats, name="stats")
 def cli_index(subcmd: str, vault_path: Path, as_json: bool) -> None:
     """维护 wiki/index/ 全局索引。
 
-    corpus-bot index sync <vault> → 重建 wiki/index/concepts.json + sources.json
+    corpus index sync <vault> → 重建 wiki/index/concepts.json + sources.json
     """
     if subcmd != "sync":
         _err(f"unknown subcmd: {subcmd}")

@@ -1,12 +1,12 @@
-# corpus-bot
+# corpus
 
 LLM-driven wiki builder (CLI-first, LLM-decoupled). 把 markdown 资料入库，自动构建结构化 wiki（含质检）。
 
 ## 设计原则
 
-- **CLI-first**：所有功能通过 `corpus-bot <subcommand>` 调用
+- **CLI-first**：所有功能通过 `corpus <subcommand>` 调用
 - **Skill-friendly**：CLI 设计让 agent 通过 Bash 自然使用
-- **LLM-decoupled**：corpus-bot 不调任何 LLM，extract / compile / 评分由 agent 端负责
+- **LLM-decoupled**：corpus 不调任何 LLM，extract / compile / 评分由 agent 端负责
 - **Local-first**：vault 是用户拥有的本地 markdown 目录
 - **Storage as pure functions**：未来需要 MCP 时只是 CLI 的薄包装
 
@@ -14,17 +14,17 @@ LLM-driven wiki builder (CLI-first, LLM-decoupled). 把 markdown 资料入库，
 
 ```bash
 # 1. 初始化 vault
-corpus-bot vault init ~/my-wiki
+corpus vault init ~/my-wiki
 
 # 2. 落源（content-hash dedup + 撞名改名）
-corpus-bot sources ingest ~/my-wiki ~/notes/postgresql.md
-corpus-bot sources batch ~/my-wiki ~/notes/ --glob "*.md"
+corpus sources ingest ~/my-wiki ~/notes/postgresql.md
+corpus sources batch ~/my-wiki ~/notes/ --glob "*.md"
 
-# 3. Agent 自己用 LLM 抽 concepts（不在 corpus-bot 里）
+# 3. Agent 自己用 LLM 抽 concepts（不在 corpus 里）
 # （用你自己的 OpenAI / Anthropic key）
 
 # 4. 写 concept
-corpus-bot concepts write ~/my-wiki \
+corpus concepts write ~/my-wiki \
     --slug postgresql-mvcc \
     --title "PostgreSQL MVCC" \
     --body "..." \
@@ -32,16 +32,16 @@ corpus-bot concepts write ~/my-wiki \
     --links postgres-transactions,wal
 
 # 5. 搜索 / 浏览
-corpus-bot concepts search ~/my-wiki "MVCC"
-corpus-bot concepts show ~/my-wiki postgresql-mvcc
+corpus concepts search ~/my-wiki "MVCC"
+corpus concepts show ~/my-wiki postgresql-mvcc
 
 # 6. 质检
-corpus-bot concepts uncertified ~/my-wiki
-corpus-bot concepts certify ~/my-wiki postgresql-mvcc --score 0.85 \
+corpus concepts uncertified ~/my-wiki
+corpus concepts certify ~/my-wiki postgresql-mvcc --score 0.85 \
     --issues "缺源" --suggestions "补 WAL 段"
 
 # 7. 看统计
-corpus-bot stats ~/my-wiki
+corpus stats ~/my-wiki
 ```
 
 ## Vault 目录结构
@@ -72,7 +72,7 @@ pip install -e .[dev]
 ```bash
 PYTHONPATH=src python3 -m pytest tests/ -v
 # 或安装后
-corpus-bot --version
+corpus --version
 pytest
 ```
 
@@ -101,7 +101,7 @@ tests/                  # pytest 28 个 case
 
 ## Roadmap
 
-- **Stage 1（当前）**：CLI + Skill，corpus-bot 是纯数据层
+- **Stage 1（当前）**：CLI + Skill，corpus 是纯数据层
 - **Stage 2**：wiki 健康检查 & 优化（自动合并重复、修复链接、staleness 检测）
 - **Stage 3**：多路查询（FTS5 全文检索 + 语义搜索）
 - **Stage 4（可选）**：MCP thin wrapper（如果需要跨 agent 平台）

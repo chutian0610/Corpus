@@ -1,19 +1,19 @@
-# corpus-bot — Agent Instructions
+# corpus — Agent Instructions
 
 LLM-driven wiki builder, **CLI-first + LLM-decoupled**。Python ≥3.11，依赖仅 `click`。
 
 ## 架构（必读）
 
 ```
-用户 ─对话─▶ Agent (LLM) ─Bash tool─▶ corpus-bot CLI ──▶ vault 目录 + .wiki-meta/corpus.db
+用户 ─对话─▶ Agent (LLM) ─Bash tool─▶ corpus CLI ──▶ vault 目录 + .wiki-meta/corpus.db
             │                    │
             │                    └─ storage.py (纯 Python 函数，无 LLM)
             │
             └─ 🔥 自己用 OpenAI/Anthropic SDK 抽 concepts / 评分
-                （不在 corpus-bot 进程里）
+                （不在 corpus 进程里）
 ```
 
-**corpus-bot 不调任何 LLM**——extract / compile / 评分都是 agent 自己的责任。
+**corpus 不调任何 LLM**——extract / compile / 评分都是 agent 自己的责任。
 
 ## 关键约定
 
@@ -29,28 +29,28 @@ LLM-driven wiki builder, **CLI-first + LLM-decoupled**。Python ≥3.11，依赖
 
 ```bash
 # 初始化
-corpus-bot vault init <path>
+corpus vault init <path>
 
 # 落源
-corpus-bot sources ingest <vault> <file>
-corpus-bot sources batch <vault> <dir> --glob "*.md"
+corpus sources ingest <vault> <file>
+corpus sources batch <vault> <dir> --glob "*.md"
 
 # 写 / 查 concept（agent 自己用 LLM 生成 body + **必传 quote_span**）
-corpus-bot concepts write <vault> --slug X --title Y --body Z     --extractions '[{"source_id":"SID","quote_span":"原文片段..."}]'     --prompt-version extract-v1     --links ...
-corpus-bot concepts show <vault> <slug>
-corpus-bot concepts search <vault> <query>
-corpus-bot concepts evidence <vault> <slug>  # 查抽取证据
+corpus concepts write <vault> --slug X --title Y --body Z     --extractions '[{"source_id":"SID","quote_span":"原文片段..."}]'     --prompt-version extract-v1     --links ...
+corpus concepts show <vault> <slug>
+corpus concepts search <vault> <query>
+corpus concepts evidence <vault> <slug>  # 查抽取证据
 
 # 维护 vault
-corpus-bot sources delete <vault> <sid>     # 默认 dry-run，看 orphan 影响
-corpus-bot concepts list <vault> --orphans    # 看无源 concept
-corpus-bot concepts add-source <vault> <slug> --source-id SID --quote-span "..."
-corpus-bot index sync <vault>               # 导出 wiki/index/*.json
+corpus sources delete <vault> <sid>     # 默认 dry-run，看 orphan 影响
+corpus concepts list <vault> --orphans    # 看无源 concept
+corpus concepts add-source <vault> <slug> --source-id SID --quote-span "..."
+corpus index sync <vault>               # 导出 wiki/index/*.json
 
 # 质检
-corpus-bot concepts uncertified <vault>
-corpus-bot concepts certify <vault> <slug> --score 0.85 --issues ... --suggestions ...
-corpus-bot stats <vault>
+corpus concepts uncertified <vault>
+corpus concepts certify <vault> <slug> --score 0.85 --issues ... --suggestions ...
+corpus stats <vault>
 ```
 
 ## 跑测试
@@ -63,12 +63,12 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 
 ## 环境前置
 
-corpus-bot 通过 `[project.scripts]` 注册为 `corpus-bot` 全局命令。
+corpus 通过 `[project.scripts]` 注册为 `corpus` 全局命令。
 
 ```bash
 # 验证安装
-corpus-bot --version
-# corpus-bot, version 0.2.0
+corpus --version
+# corpus, version 0.2.0
 
 # 本地开发 (项目根):
 uv tool install -e .    # 推荐 (隔离)
@@ -129,7 +129,7 @@ uv tool install -e .    # 推荐 (隔离)
 
 ## 行为规范
 
-- **LLM 调用一律在 agent 端**——corpus-bot 进程里不 import 任何 LLM SDK
+- **LLM 调用一律在 agent 端**——corpus 进程里不 import 任何 LLM SDK
 - **改 storage schema 必须同步 SKILL.md**——storage.py 是单源真源，但 CLI tool schema 决定了 agent 工作流
 - **任何改 schema 的 PR 必须附测试**——`tests/test_storage.py` 是覆盖最厚的
 - **不要把 `.wiki-meta/`、`corpus.db` 入 git**——已在 .gitignore

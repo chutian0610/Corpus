@@ -1,6 +1,6 @@
 """错误模型。
 
-corpus-bot 错误分类：
+corpus 错误分类：
 - ConfigError: 配置错误（vault 不存在、参数非法）
 - ValidationError: 七条 validate_source_path 失败
 - ConflictError: 业务冲突（slug 重复、source 已存在）
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 
 class CorpusBotError(Exception):
-    """corpus-bot 基类错误。"""
+    """corpus 基类错误。"""
 
     def __init__(self, message: str, *, hint: str | None = None) -> None:
         super().__init__(message)

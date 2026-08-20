@@ -1,9 +1,9 @@
 ---
-name: corpus-bot
-description: 把 markdown 资料入库到本地 vault，自动构建结构化 wiki（含质检）。corpus-bot 是 LLM-decoupled CLI：所有 LLM 调用（extract / 评分）由 agent 端负责，corpus-bot 只做纯数据操作。
+name: corpus
+description: 把 markdown 资料入库到本地 vault，自动构建结构化 wiki（含质检）。corpus 是 LLM-decoupled CLI：所有 LLM 调用（extract / 评分）由 agent 端负责，corpus 只做纯数据操作。
 ---
 
-# corpus-bot Skill
+# corpus Skill
 
 ## 何时用
 
@@ -17,24 +17,24 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 ## 核心架构
 
 ```
-用户 ─对话─▶ Agent (LLM) ─Bash tool─▶ corpus-bot CLI ──▶ vault 目录 + .wiki-meta/corpus.db
+用户 ─对话─▶ Agent (LLM) ─Bash tool─▶ corpus CLI ──▶ vault 目录 + .wiki-meta/corpus.db
             │                    │
             │                    └─ storage.py (纯 Python 函数，无 LLM)
             │
             └─ 🔥 自己用 OpenAI/Anthropic API 抽 concepts / 评分
-                （不在 corpus-bot 进程里）
+                （不在 corpus 进程里）
 ```
 
-**关键**：corpus-bot 不调任何 LLM。LLM 调用全在 agent 端。
+**关键**：corpus 不调任何 LLM。LLM 调用全在 agent 端。
 
 ## 环境前置
 
-corpus-bot 已发布为 entry point (`pip install -e .` / `uv tool install -e .`)，agent 直接调 `corpus-bot` 命令。
+corpus 已发布为 entry point (`pip install -e .` / `uv tool install -e .`)，agent 直接调 `corpus` 命令。
 
 ```bash
 # 验证可用性（agent 第一步应该跑）
-corpus-bot --version
-# corpus-bot, version 0.2.0
+corpus --version
+# corpus, version 0.2.0
 
 # 没装时, 用户/agent 跑 (在项目根):
 uv tool install -e .     # 推荐 (隔离)
@@ -42,7 +42,7 @@ uv tool install -e .     # 推荐 (隔离)
 pip install -e .         # 需要 venv
 ```
 
-**不要用** `python3 -m corpus_bot` (legacy, 不再推荐)。SKILL.md 所有示例都假定 `corpus-bot` 在 PATH 里。
+**不要用** `python3 -m corpus_bot` (legacy, 不再推荐)。SKILL.md 所有示例都假定 `corpus` 在 PATH 里。
 
 `vault init <path>` 等价 mkdir -p, vault root 不存在会自动建, 不需要先 mkdir。
 
@@ -50,25 +50,25 @@ pip install -e .         # 需要 venv
 
 ```bash
 # 1. 初始化 vault（一次性）
-corpus-bot vault init ~/my-wiki
+corpus vault init ~/my-wiki
 
 # 2. 落源（content-hash dedup，所有 ingest 都加 `-ingest-<UTC compact ISO>` 后缀；软删复活用 --force-revive）
-corpus-bot sources ingest ~/my-wiki ~/notes/postgresql.md
+corpus sources ingest ~/my-wiki ~/notes/postgresql.md
 # 同 hash 已 soft-deleted? 加 --force-revive 复活同一 source_id
-corpus-bot sources ingest --force-revive ~/my-wiki ~/notes/postgresql.md
+corpus sources ingest --force-revive ~/my-wiki ~/notes/postgresql.md
 # 返回：{"action":"staged","source_id":"d607...","raw_path":"...","size_bytes":187}
 
 # 3. 批量落源
-corpus-bot sources batch ~/my-wiki ~/notes/ --glob "*.md"
+corpus sources batch ~/my-wiki ~/notes/ --glob "*.md"
 
 # 4. 列源
-corpus-bot sources list ~/my-wiki --status staged
+corpus sources list ~/my-wiki --status staged
 
 # 5. Agent 自己用 LLM 抽 concepts（OpenAI/Anthropic）
-# （用你自己的 API key，不在 corpus-bot 里）
+# （用你自己的 API key，不在 corpus 里）
 
 # 6. 写 concept（**必传 --extractions**：每个 source 一段 quote_span 原文证据）
-corpus-bot concepts write ~/my-wiki \
+corpus concepts write ~/my-wiki \
     --slug postgres-mvcc \
     --title "PostgreSQL MVCC" \
     --body "..." \
@@ -77,21 +77,21 @@ corpus-bot concepts write ~/my-wiki \
     --links postgres-transactions,wal
 
 # 7. 标记源完成
-corpus-bot sources commit ~/my-wiki d607...
+corpus sources commit ~/my-wiki d607...
 
 # 8. 查 concept
-corpus-bot concepts show ~/my-wiki postgres-mvcc
+corpus concepts show ~/my-wiki postgres-mvcc
 
 # 9. 搜索
-corpus-bot concepts search ~/my-wiki "MVCC"
+corpus concepts search ~/my-wiki "MVCC"
 
 # 10. 质检（agent 自己用 LLM 评分）
-corpus-bot concepts uncertified ~/my-wiki
-corpus-bot concepts certify ~/my-wiki postgres-mvcc --score 0.85 \
+corpus concepts uncertified ~/my-wiki
+corpus concepts certify ~/my-wiki postgres-mvcc --score 0.85 \
     --issues "缺源" --suggestions "补 WAL 段"
 
 # 11. 看统计
-corpus-bot stats ~/my-wiki
+corpus stats ~/my-wiki
 ```
 
 ## 标准工作流（agent 编排）
@@ -162,7 +162,7 @@ corpus-bot stats ~/my-wiki
 
 ## 错误处理
 
-corpus-bot 的所有错误返回 exit code 1 + stderr：
+corpus 的所有错误返回 exit code 1 + stderr：
 
 ```
 error: <message>
@@ -170,7 +170,7 @@ error: <message>
 ```
 
 常见错误：
-- `vault does not exist` → 先 `corpus-bot vault init`
+- `vault does not exist` → 先 `corpus vault init`
 - `duplicate content already staged as ...` → 该 source_id 已存在，跳过
 - `duplicate content exists but is deleted: ...` → 同 hash 已 soft-deleted,加 `--force-revive` 复活
 - `concept slug already exists` → 用 `concepts update` 而非 `write`
@@ -189,7 +189,7 @@ sources.batch 的每个 result 也带 `hint` 字段 (deleted 行未带 `--force-
 每个命令支持 `--json` 标志，agent 解析用：
 
 ```bash
-corpus-bot sources list vault --json | python3 -c "
+corpus sources list vault --json | python3 -c "
 import json, sys
 items = json.load(sys.stdin)
 for it in items:
@@ -203,11 +203,11 @@ for it in items:
 
 ```bash
 # 1. 先 dry-run 看会 orphan 哪些 concept
-corpus-bot sources delete <vault> <sid>
+corpus sources delete <vault> <sid>
 
 # 2. 看到 "will orphan: [...]" 评估是否真的删
 # 3. 真的删：
-corpus-bot sources delete <vault> <sid> --yes --reason version-update
+corpus sources delete <vault> <sid> --yes --reason version-update
 
 # 结果：
 # - sources.status = 'deleted'（软删，physical file 保留）

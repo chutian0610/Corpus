@@ -70,7 +70,7 @@ def ensure_vault(vault_root: Path) -> dict[str, Path]:
     # gitignore .wiki-meta/  (让 daemon 元数据不进 git)
     gitignore = paths["meta"] / ".gitignore"
     if not gitignore.exists():
-        gitignore.write_text("# corpus-bot 元数据\n*\n!.gitignore\n")
+        gitignore.write_text("# corpus 元数据\n*\n!.gitignore\n")
 
     return paths
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 本地安装 corpus-bot 为全局 'corpus-bot' 命令 (uv tool install -e .)
+# 本地安装 corpus 为全局 'corpus' 命令 (uv tool install -e .)
 #
 # 用法:
 #   ./scripts/install.sh                 # 默认装 python3.14 (项目 requires-python >=3.11)
@@ -9,8 +9,8 @@
 #   uv tool uninstall corpus-bot
 #
 # 验证安装:
-#   which corpus-bot
-#   corpus-bot --version
+#   which corpus
+#   corpus --version
 
 set -euo pipefail
 
@@ -20,7 +20,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
-echo "==> corpus-bot 本地安装 (editable mode)"
+echo "==> corpus 本地安装 (editable mode)"
 echo "    Python: $PYTHON"
 echo "    Project: $PROJECT_ROOT"
 echo ""
@@ -71,8 +71,8 @@ esac
 # 5. 验证
 echo ""
 echo "==> 验证安装"
-if command -v corpus-bot >/dev/null 2>&1; then
-  CB="$(command -v corpus-bot)"
+if command -v corpus >/dev/null 2>&1; then
+  CB="$(command -v corpus)"
   VER="$("$CB" --version)"
   echo "    which: $CB"
   echo "    version: $VER"
@@ -87,8 +87,8 @@ echo "==> 跑 pytest 基线 (确认 install 后测试 OK)"
 if uv run --python "$PYTHON" --with pytest pytest tests/ -q --no-header 2>&1 | tail -5; then
   echo ""
   echo "==> 完成. 下一步:"
-  echo "   corpus-bot vault init <path>           # 建 vault"
-  echo "   corpus-bot sources ingest <vault> <file>  # 入原材料 (vault 外)"
+  echo "   corpus vault init <path>           # 建 vault"
+  echo "   corpus sources ingest <vault> <file>  # 入原材料 (vault 外)"
   echo "   详细用法: cat .agents/skills/corpus-bot/SKILL.md"
 else
   echo "!! 测试失败, install 可能不完整. 跑 'uv tool uninstall corpus-bot && ./scripts/install.sh' 重试"

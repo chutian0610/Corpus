@@ -20,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-corpus-bot = "corpus_bot.cli:main"
+corpus = "corpus_bot.cli:main"
 
 # Codex platform skill 入口通过项目级 .agents/skills/corpus-bot/SKILL.md 发现,
 # 不在这里声明 (setuptools 校验 module 必须在 corpus_bot 包内, 会 build 失败).

@@ -14,7 +14,7 @@ echo ""
 
 # 1. 创建 vault
 mkdir -p "$VAULT"
-PYTHONPATH=src python3 -m corpus_bot vault init "$VAULT" --json > /dev/null
+corpus vault init "$VAULT" --json > /dev/null
 
 # 2. 创建示例 notes
 mkdir -p "$NOTE_DIR"
@@ -48,15 +48,15 @@ Replicas apply WAL records and can serve read queries.
 NOTE
 
 # 3. 批量落源
-PYTHONPATH=src python3 -m corpus_bot sources batch "$VAULT" "$VAULT/notes" --glob "*.md"
+corpus sources batch "$VAULT" "$VAULT/notes" --glob "*.md"
 echo ""
 
 # 4. 列源
-PYTHONPATH=src python3 -m corpus_bot sources list "$VAULT" --json
+corpus sources list "$VAULT" --json
 echo ""
 
 # 5. 模拟 LLM 抽取 + 写 concept（实际使用时代替此处为真实 LLM 调用）
-SIDS=$(PYTHONPATH=src python3 -m corpus_bot sources list "$VAULT" --json | python3 -c "
+SIDS=$(corpus sources list "$VAULT" --json | python3 -c "
 import json, sys
 for it in json.load(sys.stdin):
     print(it['source_id'])
@@ -65,7 +65,7 @@ for it in json.load(sys.stdin):
 # 演示写一个 concept
 FIRST_SID=$(echo "$SIDS" | head -1)
 echo "=== writing concept (placeholder body, real usage: agent calls LLM) ==="
-PYTHONPATH=src python3 -m corpus_bot concepts write "$VAULT" \
+corpus concepts write "$VAULT" \
     --slug postgresql-mvcc \
     --title "PostgreSQL MVCC" \
     --body "MVCC explanation. Each row carries xmin/xmax tracking columns. Old versions kept until VACUUM." \
@@ -75,18 +75,18 @@ echo ""
 
 # 6. 搜索
 echo "=== search 'MVCC' ==="
-PYTHONPATH=src python3 -m corpus_bot concepts search "$VAULT" "MVCC"
+corpus concepts search "$VAULT" "MVCC"
 echo ""
 
 # 7. 认证（模拟 LLM 评分）
 echo "=== certify ==="
-PYTHONPATH=src python3 -m corpus_bot concepts certify "$VAULT" postgresql-mvcc \
+corpus concepts certify "$VAULT" postgresql-mvcc \
     --score 0.85 --issues "短,缺 source 2" --suggestions "补 WAL 段"
 echo ""
 
 # 8. 看 stats
 echo "=== stats ==="
-PYTHONPATH=src python3 -m corpus_bot stats "$VAULT" --json
+corpus stats "$VAULT" --json
 echo ""
 
 # 9. 看实际 wiki 文件
