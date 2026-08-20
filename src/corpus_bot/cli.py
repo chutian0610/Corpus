@@ -22,6 +22,7 @@ from .storage import (
     add_source_to_concept,
     certification_stats,
     commit_source,
+    delete_concept,
     dry_run_delete_source,
     export_index,
     find_concept_by_link,
@@ -485,12 +486,129 @@ def concepts_write(
             links=link_list,
             prompt_version=prompt_version,
         )
-        # 物理写文件
+        # 物理写文件 (失败需回滚 DB, 避免概念存在但 wiki 文件缺的不一致)
         wiki_path = paths["wiki_concept"] / f"{slug}.md"
         frontmatter = f"---\nslug: {slug}\ntitle: {title}\n---\n\n"
-        wiki_path.write_text(frontmatter + body, encoding="utf-8")
+        try:
+            wiki_path.write_text(frontmatter + body, encoding="utf-8")
+        except OSError as e:
+            delete_concept(paths["corpus_db"], slug)
+            _err(
+                f"failed to write wiki file {wiki_path}: {e}",
+                hint="DB rows rolled back via delete_concept; no orphan concept left",
+            )
         result["wiki_path"] = str(wiki_path)
         # 自动 export index
+        export_index(paths["corpus_db"], paths["wiki_index"])
+    except Exception as e:
+        _err(str(e), hint=getattr(e, "hint", None))
+    _emit(result, as_json=as_json)
+
+
+@concepts.command(name="update")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.argument("slug")
+@click.option("--title", default=None, help="新标题 (省略则不改)")
+@click.option("--body", default=None, help="新正文 (省略则不改)")
+@click.option("--add-extractions", "add_extractions_json", default=None,
+              help='JSON array: [{"source_id":"...","quote_span":"..."}, ...] (增量加 extractions, 必填 quote_span)')
+@click.option("--add-links", "add_links", default="", help="逗号分隔 wikilink slugs (slug-safe, 拒绝自引用)")
+@click.option("--prompt-version", default=None)
+@click.option("--json", "as_json", is_flag=True)
+def concepts_update(
+    vault_path: Path, slug: str,
+    title: str | None, body: str | None,
+    add_extractions_json: str | None, add_links: str,
+    prompt_version: str | None, as_json: bool,
+) -> None:
+    """增量更新 concept: 改 title/body, 加 extractions, 加 wikilinks.
+
+    仅做增量 (与 write_concept 不同, 没有"全量覆盖 extractions"接口).
+    想重写 evidence 请用 `concepts write` 不同的 slug, 或先 `delete` 再 `write`.
+    """
+    add_extractions = None
+    if add_extractions_json:
+        try:
+            add_extractions = json.loads(add_extractions_json)
+        except json.JSONDecodeError as e:
+            _err(f"--add-extractions 不是合法 JSON: {e}")
+        if not isinstance(add_extractions, list):
+            _err("--add-extractions 必须是 JSON array")
+
+    link_list = [s.strip() for s in add_links.split(",") if s.strip()] if add_links else None
+
+    paths = _resolve_db(vault_path)
+    try:
+        result = update_concept(
+            paths["corpus_db"],
+            slug=slug,
+            title=title,
+            body=body,
+            add_extractions=add_extractions,
+            add_links=link_list,
+            prompt_version=prompt_version,
+        )
+        # 物理写文件 (body 改了时)
+        if body is not None or title is not None:
+            wiki_path = paths["wiki_concept"] / f"{slug}.md"
+            # read 现 body, 拼新 frontmatter
+            from .storage import read_concept
+            current = read_concept(paths["corpus_db"], slug) or {}
+            new_body = body if body is not None else current.get("body", "")
+            new_title = title if title is not None else current.get("title", slug)
+            frontmatter = f"---\nslug: {slug}\ntitle: {new_title}\n---\n\n"
+            try:
+                wiki_path.write_text(frontmatter + new_body, encoding="utf-8")
+            except OSError as e:
+                _err(
+                    f"failed to write wiki file {wiki_path}: {e}",
+                    hint="DB 已更新; 需手工修复 wiki 文件或 delete + 重 write",
+                )
+            result["wiki_path"] = str(wiki_path)
+        export_index(paths["corpus_db"], paths["wiki_index"])
+    except Exception as e:
+        _err(str(e), hint=getattr(e, "hint", None))
+    _emit(result, as_json=as_json)
+
+
+@concepts.command(name="delete")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.argument("slug")
+@click.option("--dry-run/--no-dry-run", default=True,
+              help="默认先 dry-run 显示会删什么; --no-dry-run 直接删")
+@click.option("--json", "as_json", is_flag=True)
+def concepts_delete(vault_path: Path, slug: str, dry_run: bool, as_json: bool) -> None:
+    """硬删 concept + 清理 extractions / links. 不影响 source 表.
+
+    是 user-level 决策, 没二次确认 flag; dry-run 默认开, 看清再 --no-dry-run.
+    """
+    paths = _resolve_db(vault_path)
+    from .storage import read_concept
+    info = read_concept(paths["corpus_db"], slug)
+    if not info:
+        _err(f"concept not found: {slug}")
+    preview = {
+        "slug": slug,
+        "title": info.get("title"),
+        "source_ids": info.get("source_ids", []),
+        "links": info.get("links", []),
+        "is_orphan": info.get("is_orphan", False),
+        "would_delete": True,
+        "action": "DRY-RUN: pass --no-dry-run to actually delete",
+    }
+    if dry_run:
+        _emit(preview, as_json=as_json)
+        return
+    try:
+        result = delete_concept(paths["corpus_db"], slug)
+        # 同时清 wiki 文件 (best-effort)
+        wiki_path = paths["wiki_concept"] / f"{slug}.md"
+        if wiki_path.exists():
+            try:
+                wiki_path.unlink()
+                result["wiki_file_removed"] = True
+            except OSError:
+                result["wiki_file_removed"] = False
         export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
@@ -511,12 +629,24 @@ def concepts_show(vault_path: Path, slug: str, as_json: bool) -> None:
 
 @concepts.command(name="list")
 @click.argument("vault_path", type=click.Path(path_type=Path))
+@click.option("--orphans", "orphans_only", is_flag=True, help="只看 orphan (无 source_ids)")
+@click.option("--certified", "certified_only", is_flag=True, help="只看已认证")
+@click.option("--uncertified", "uncertified_only", is_flag=True, help="只看未认证")
 @click.option("--limit", type=int, default=50)
 @click.option("--offset", type=int, default=0)
 @click.option("--json", "as_json", is_flag=True)
-def concepts_list(vault_path: Path, limit: int, offset: int, as_json: bool) -> None:
+def concepts_list(
+    vault_path: Path, orphans_only: bool, certified_only: bool, uncertified_only: bool,
+    limit: int, offset: int, as_json: bool,
+) -> None:
+    if certified_only and uncertified_only:
+        _err("--certified and --uncertified are mutually exclusive")
     paths = _resolve_db(vault_path)
-    items = list_concepts(paths["corpus_db"], limit=limit, offset=offset)
+    items = list_concepts(
+        paths["corpus_db"], limit=limit, offset=offset,
+        is_orphan=True if orphans_only else None,
+        is_certified=True if certified_only else (False if uncertified_only else None),
+    )
     _emit(items, as_json=as_json)
 
 

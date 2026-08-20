@@ -590,6 +590,7 @@ def write_concept(
             )
         source_ids_set.add(sid)
     source_ids = sorted(source_ids_set)
+    links = _validate_links(slug, links)
 
     now = _utc_now_iso()
     cid = _new_uuid12("c_")
@@ -708,6 +709,8 @@ def update_concept(
 
         old_source_ids = set(_parse_json_list(row["source_ids"]))
         old_links = set(_parse_json_list(row["links"]))
+        if add_links:
+            add_links = _validate_links(slug, list(add_links))
 
         updates: list[str] = []
         params: list[Any] = []
@@ -731,7 +734,15 @@ def update_concept(
         extraction_ids: list[str] = []
         if add_extractions:
             for ed in add_extractions:
-                sid = ed["source_id"]
+                sid = ed.get("source_id")
+                qs = ed.get("quote_span")
+                if not sid:
+                    raise StorageError("extraction missing source_id")
+                if not qs or not qs.strip():
+                    raise StorageError(
+                        f"extraction for {sid} missing quote_span",
+                        hint="quote_span is required: the original text in the source that supports this concept",
+                    )
                 # source 是否 deleted?
                 src_row = conn.execute(
                     "SELECT status FROM sources WHERE source_id=?", (sid,)
@@ -759,7 +770,7 @@ def update_concept(
                         ext_id,
                         sid,
                         slug,
-                        ed["quote_span"],
+                        qs,
                         ed.get("char_start"),
                         ed.get("char_end"),
                         now,
@@ -970,19 +981,30 @@ def list_concepts(
     limit: int = 50,
     offset: int = 0,
     is_orphan: bool | None = None,
+    is_certified: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """列 concept。is_orphan: None=全部, True=仅孤儿, False=仅非孤儿"""
-    with connect(db_path) as conn:
-        if is_orphan is None:
-            rows = conn.execute(
-                "SELECT * FROM concepts ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+    """列 concept.
+
+    is_orphan:    None=全部, True=仅孤儿, False=仅非孤儿
+    is_certified: None=全部, True=仅已认证, False=仅未认证
+    """
+    where_clauses: list[str] = []
+    params: list[Any] = []
+    if is_orphan is not None:
+        where_clauses.append("is_orphan=?")
+        params.append(1 if is_orphan else 0)
+    if is_certified is not None:
+        if is_certified:
+            where_clauses.append("certified_at IS NOT NULL")
         else:
-            rows = conn.execute(
-                "SELECT * FROM concepts WHERE is_orphan=? ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                (1 if is_orphan else 0, limit, offset),
-            ).fetchall()
+            where_clauses.append("certified_at IS NULL")
+    sql = "SELECT * FROM concepts"
+    if where_clauses:
+        sql += " WHERE " + " AND ".join(where_clauses)
+    sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    with connect(db_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
     out = []
     for r in rows:
         d = dict(r)
@@ -1168,6 +1190,66 @@ def search_concepts(db_path: Path, query: str, *, limit: int = 10) -> list[dict[
 # ============================================================================
 # index sync (导出 wiki/index/*.json)
 # ============================================================================
+
+def _validate_links(slug: str, links: list[str]) -> list[str]:
+    """links 校验: 去重 + 拒绝自引用 + 拒绝非 slug-safe 字符串.
+
+    返回 cleaned list (保持原顺序, 已去重).
+    """
+    from .ids import slugify
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for raw in links:
+        link = raw.strip() if isinstance(raw, str) else raw
+        if not link:
+            continue
+        if link == slug:
+            raise StorageError(
+                f"link cannot be self-reference: {link!r}",
+                hint="concept cannot wikilink to itself",
+            )
+        if slugify(link) != link:
+            raise StorageError(
+                f"link not slug-safe: {link!r}",
+                hint="links must already be valid slugs (lowercase alphanumeric + hyphens)",
+            )
+        if link in seen:
+            continue
+        seen.add(link)
+        cleaned.append(link)
+    return cleaned
+
+
+def delete_concept(db_path: Path, slug: str) -> dict[str, Any]:
+    """硬删 concept + 清理 extractions / links. 不影响 source 表.
+
+    设计: concept delete 是 user-level 决策 (agent 已经看到 orphan 警告再决定),
+    所以用 hard delete; certification_log / extractions 已记历史, 不需保留.
+
+    Returns: {"slug", "deleted_concept", "deleted_extractions_count",
+             "deleted_links_count", "had_wiki_file": bool}
+    """
+    now = _utc_now_iso()
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT concept_id FROM concepts WHERE slug=?", (slug,)).fetchone()
+        if not row:
+            raise StorageError(f"concept not found: {slug}")
+
+        ext_cur = conn.execute("DELETE FROM extractions WHERE concept_slug=?", (slug,))
+        link_cur = conn.execute("DELETE FROM links WHERE from_slug=?", (slug,))
+        conc_cur = conn.execute("DELETE FROM concepts WHERE slug=?", (slug,))
+        if conc_cur.rowcount == 0:
+            # 应该不会到这 (前面 SELECT 已确认存在)
+            raise StorageError(f"concept vanished during delete: {slug}")
+
+    return {
+        "slug": slug,
+        "deleted_concept": True,
+        "deleted_extractions_count": ext_cur.rowcount,
+        "deleted_links_count": link_cur.rowcount,
+        "deleted_at": now,
+    }
+
 
 def export_index(db_path: Path, wiki_index_dir: Path) -> dict[str, Any]:
     """导出 concepts.json + sources.json 到 wiki_index_dir。

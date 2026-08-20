@@ -92,6 +92,11 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 - `sources delete <sid>`（软删）：`status='deleted'`，自动从引用它的 concept.source_ids 移除；**不级联删 concept**
 - 如果删后 concept.source_ids 变空 → 自动 `is_orphan=1`
 - `concepts write --extractions '[...]'`：**强制每个 source 一段 quote_span 原文证据**
+- `concepts write` 物理写 `wiki/concept/<slug>.md` 失败时 → 自动 `delete_concept()` 回滚 DB 行 (避免 concept 存在但 wiki 文件缺的不一致)
+- `concepts update --add-extractions` / `--add-links`：增量 (append-only)；想重写请先 `delete` 再 `write`
+- `concepts delete` (默认 dry-run, --no-dry-run 真删): hard delete concept + extractions + links + wiki/concept/<slug>.md，不动 source 表
+- `concepts list --orphans / --certified / --uncertified`: 三个 flag 互斥 (certified + uncertified 不能同传)
+- `links` 校验：`write_concept` / `update_concept` 都拒绝自引用 + 非 slug-safe 字符串 (用 `slugify()` 反向检查)
 - 同一 (source, concept) 可多次抽取，每次都记 extractions 一行（audit history）
 
 **Schema 版本**：当前 `SCHEMA_VERSION=2`。`init_db()` 检测 `schema_meta` 表：

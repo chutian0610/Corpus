@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import json
+
 import pytest
 from click.testing import CliRunner
 
@@ -207,3 +209,193 @@ def test_batch_without_revive_flags_deleted_as_failed(vault: Path):
     assert '"failed": 1' in res.output
     assert '"hint"' in res.output
     assert "--force-revive" in res.output
+
+
+# ---------- concepts list 过滤 ----------
+
+def test_concepts_list_orphans_filter(vault: Path):
+    """--orphans 只返回 source_ids=[] 的 concept."""
+    from corpus_bot.storage import write_concept, init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+
+    # 需要先 ingest 一个 source 给非 orphan concept
+    (vault / "raw" / "x.md").write_text("alpha", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    write_concept(vault / ".wiki-meta" / "corpus.db",
+        slug="with-src", title="With", body="b",
+        extractions_data=[{"source_id": sid, "quote_span": "alpha"}], links=[])
+    write_concept(vault / ".wiki-meta" / "corpus.db",
+        slug="orphan-1", title="Orphan1", body="b",
+        extractions_data=[{"source_id": sid, "quote_span": "alpha"}], links=[])
+    # 让 orphan-1 变 orphan: remove_source
+    _runner().invoke(cli, ["concepts", "remove-source", str(vault), "orphan-1", "--source-id", sid])
+
+    res = _runner().invoke(cli, ["concepts", "list", str(vault), "--orphans", "--json"])
+    items = json.loads(res.output)
+    assert {c["slug"] for c in items} == {"orphan-1"}
+
+
+def test_concepts_list_certified_filters(vault: Path):
+    """--certified / --uncertified 互斥, 默认无过滤."""
+    from corpus_bot.storage import write_concept, mark_certified, init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (vault / "raw" / "x.md").write_text("a", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+    write_concept(vault / ".wiki-meta" / "corpus.db",
+        slug="certed", title="C", body="b",
+        extractions_data=[{"source_id": sid, "quote_span": "a"}], links=[])
+    write_concept(vault / ".wiki-meta" / "corpus.db",
+        slug="raw", title="R", body="b",
+        extractions_data=[{"source_id": sid, "quote_span": "a"}], links=[])
+    mark_certified(vault / ".wiki-meta" / "corpus.db", slug="certed", score=0.9, issues=[], suggestions=[])
+
+    only_cert = json.loads(_runner().invoke(cli, ["concepts", "list", str(vault), "--certified", "--json"]).output)
+    only_uncert = json.loads(_runner().invoke(cli, ["concepts", "list", str(vault), "--uncertified", "--json"]).output)
+    assert {c["slug"] for c in only_cert} == {"certed"}
+    assert {c["slug"] for c in only_uncert} == {"raw"}
+
+    # 同时传 --certified --uncertified 应报错
+    res = _runner().invoke(cli, ["concepts", "list", str(vault), "--certified", "--uncertified", "--json"])
+    assert res.exit_code == 1
+    assert "mutually exclusive" in (res.stderr or "")
+
+
+# ---------- concepts update CLI ----------
+
+def test_concepts_update_changes_body_and_adds_source(vault: Path):
+    """update: --body 覆盖, --add-extractions 加新 source, --add-links 加新 link."""
+    from corpus_bot.storage import init_db, read_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+
+    # 准备两个 source
+    (vault / "raw" / "a.md").write_text("alpha", encoding="utf-8")
+    (vault / "raw" / "b.md").write_text("beta", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "a.md"), "--json"])
+    sid_a = json.loads(res.output)["source_id"]
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "b.md"), "--json"])
+    sid_b = json.loads(res.output)["source_id"]
+
+    # write initial concept with sid_a
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "topic", "--title", "Topic", "--body", "initial body",
+        "--extractions", json.dumps([{"source_id": sid_a, "quote_span": "alpha"}]),
+        "--json",
+    ])
+    assert res.exit_code == 0, res.output
+
+    # update: 改 body + 加 sid_b + 加 link
+    res = _runner().invoke(cli, [
+        "concepts", "update", str(vault), "topic",
+        "--body", "new body after update",
+        "--add-extractions", json.dumps([{"source_id": sid_b, "quote_span": "beta"}]),
+        "--add-links", "related-topic",
+        "--json",
+    ])
+    assert res.exit_code == 0, res.output
+    parsed = json.loads(res.output)
+    assert sid_b in parsed["added_source_ids"]
+    assert sid_a in parsed["source_ids"] and sid_b in parsed["source_ids"]
+
+    # wiki 文件反映新 body
+    wiki = (vault / "wiki" / "concept" / "topic.md").read_text(encoding="utf-8")
+    assert "new body after update" in wiki
+    assert "initial body" not in wiki
+
+    # DB body 也更新
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "topic")
+    assert info["body"] == "new body after update"
+
+
+def test_concepts_update_rejects_self_link(vault: Path):
+    """update 加 link 含自引用应拒绝."""
+    from corpus_bot.storage import init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "self", "--title", "S", "--body", "b",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "x"}]),
+        "--json",
+    ])
+    res = _runner().invoke(cli, [
+        "concepts", "update", str(vault), "self",
+        "--add-links", "self", "--json",
+    ])
+    assert res.exit_code == 1
+    assert "self-reference" in (res.stderr or "").lower()
+
+
+# ---------- concepts delete CLI ----------
+
+def test_concepts_delete_dry_run_then_real(vault: Path):
+    """默认 dry-run 显示信息, --no-dry-run 真删."""
+    from corpus_bot.storage import init_db, read_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+    _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "kill", "--title", "K", "--body", "b",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "x"}]),
+        "--json",
+    ])
+
+    # dry-run: 仍存在
+    res = _runner().invoke(cli, ["concepts", "delete", str(vault), "kill", "--json"])
+    assert res.exit_code == 0
+    assert read_concept(vault / ".wiki-meta" / "corpus.db", "kill") is not None
+    # 真删
+    res = _runner().invoke(cli, ["concepts", "delete", str(vault), "kill", "--no-dry-run", "--json"])
+    assert res.exit_code == 0
+    assert read_concept(vault / ".wiki-meta" / "corpus.db", "kill") is None
+    # wiki 文件也被删
+    assert not (vault / "wiki" / "concept" / "kill.md").exists()
+
+
+def test_concepts_delete_404_on_unknown(vault: Path):
+    res = _runner().invoke(cli, ["concepts", "delete", str(vault), "nope", "--no-dry-run"])
+    assert res.exit_code == 1
+    assert "concept not found" in (res.stderr or "")
+
+
+# ---------- concepts write 物理写失败回滚 ----------
+
+def test_concepts_write_rolls_back_db_on_wiki_write_failure(vault: Path, monkeypatch):
+    """wiki 文件写失败时, DB 概念行应被 delete_concept 回滚."""
+    from corpus_bot.storage import init_db, read_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    # 让 wiki_path.write_text 抛 OSError
+    from corpus_bot import cli as cli_mod
+    real_write_text = type(cli_mod.Path("x")).write_text if False else None
+    # 用 monkeypatch patch click.Path 内部 Path.write_text: 替换 Path 的 write_text
+    from pathlib import Path as PathCls
+    def boom(self, *a, **kw):
+        # 仅当写到 wiki/concept/<slug>.md 时失败
+        if "wiki" in str(self) and "concept" in str(self) and str(self).endswith(".md"):
+            raise OSError("simulated disk full")
+        return PathCls.write_text(self, *a, **kw)
+    monkeypatch.setattr(PathCls, "write_text", boom)
+
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "rollback-me", "--title", "R", "--body", "b",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "x"}]),
+        "--json",
+    ])
+    assert res.exit_code == 1
+    assert "rolled back" in (res.stderr or "").lower() or "simulated disk full" in (res.stderr or "").lower()
+
+    # DB 行已回滚 (concept 应不存在)
+    assert read_concept(vault / ".wiki-meta" / "corpus.db", "rollback-me") is None

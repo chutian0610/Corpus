@@ -1,6 +1,7 @@
 """Storage 层测试 (覆盖 extractions / orphan / soft_delete / index)。"""
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -528,3 +529,141 @@ def test_init_db_idempotent_on_v2(tmp_path: Path):
     with sqlite3.connect(str(db_path)) as c:
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
         assert int(ver[0]) == 2
+
+
+# ---------- delete_concept ----------
+
+def test_delete_concept_removes_concept_and_extractions_and_links(db: Path, staged_source: str):
+    from corpus_bot.storage import delete_concept, write_concept, read_concept
+    write_concept(
+        db, slug="kill-me", title="K", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "quote here"}],
+        links=["other-slug"],
+    )
+    # write_concept 已经 INSERT 了 links (kill-me -> other-slug); 测删除时清掉
+    res = delete_concept(db, "kill-me")
+    assert res["deleted_concept"] is True
+    assert res["deleted_extractions_count"] == 1
+    assert res["deleted_links_count"] == 1
+    assert read_concept(db, "kill-me") is None
+    # extractions 表里也没了
+    with sqlite3.connect(str(db)) as c:
+        ext_n = c.execute("SELECT COUNT(*) AS n FROM extractions WHERE concept_slug='kill-me'").fetchone()[0]
+        link_n = c.execute("SELECT COUNT(*) AS n FROM links WHERE from_slug='kill-me'").fetchone()[0]
+    # extractions 和 links 表里都没了 (sqlite3 已在文件顶部 import)
+    assert ext_n == 0
+    assert link_n == 0
+
+
+def test_delete_concept_raises_on_unknown_slug(db: Path):
+    from corpus_bot.storage import delete_concept
+    with pytest.raises(StorageError) as exc:
+        delete_concept(db, "nope")
+    assert "concept not found" in str(exc.value)
+
+
+def test_delete_concept_does_not_touch_sources(db: Path, staged_source: str):
+    """删 concept 不应影响 source 表 (source 仍可被其它 concept 引用)."""
+    from corpus_bot.storage import delete_concept, write_concept, read_source
+    write_concept(
+        db, slug="a", title="A", body="a",
+        extractions_data=[{"source_id": staged_source, "quote_span": "x"}],
+        links=[],
+    )
+    delete_concept(db, "a")
+    assert read_source(db, staged_source) is not None
+
+
+# ---------- list_concepts is_certified filter ----------
+
+def test_list_concepts_is_certified_filter(db: Path, staged_source: str):
+    from corpus_bot.storage import write_concept, mark_certified, list_concepts
+    write_concept(
+        db, slug="certed", title="C", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
+        links=[],
+    )
+    write_concept(
+        db, slug="raw", title="R", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
+        links=[],
+    )
+    mark_certified(db, slug="certed", score=0.9, issues=[], suggestions=[], certified_by="t")
+
+    only_cert = list_concepts(db, is_certified=True)
+    only_uncert = list_concepts(db, is_certified=False)
+    all_ = list_concepts(db)
+    assert {c["slug"] for c in only_cert} == {"certed"}
+    assert {c["slug"] for c in only_uncert} == {"raw"}
+    assert {c["slug"] for c in all_} == {"certed", "raw"}
+
+
+# ---------- _validate_links ----------
+
+def test_validate_links_dedups(db: Path):
+    from corpus_bot.storage import _validate_links
+    out = _validate_links("self", ["a", "b", "a", "c", "b"])
+    assert out == ["a", "b", "c"]
+
+
+def test_validate_links_rejects_self_reference(db: Path):
+    from corpus_bot.storage import _validate_links
+    with pytest.raises(StorageError) as exc:
+        _validate_links("foo", ["bar", "foo"])
+    assert "self-reference" in str(exc.value).lower()
+    assert exc.value.hint and "self" in exc.value.hint.lower()
+
+
+def test_validate_links_rejects_non_slug_safe(db: Path):
+    from corpus_bot.storage import _validate_links
+    with pytest.raises(StorageError) as exc:
+        _validate_links("a", ["Bad_Slug", "ok-slug"])
+    assert "slug-safe" in str(exc.value).lower()
+    assert "Bad_Slug" in str(exc.value)
+
+
+def test_validate_links_skips_empty(db: Path):
+    from corpus_bot.storage import _validate_links
+    assert _validate_links("a", ["", "  ", "ok"]) == ["ok"]
+
+
+# ---------- update_concept quote_span 校验 ----------
+
+def test_update_concept_requires_quote_span(db: Path, staged_source: str):
+    """与 write_concept 一致: add_extractions 必须带 quote_span."""
+    from corpus_bot.storage import update_concept, write_concept
+    write_concept(
+        db, slug="u", title="U", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
+        links=[],
+    )
+    with pytest.raises(StorageError) as exc:
+        update_concept(
+            db, slug="u",
+            add_extractions=[{"source_id": staged_source}],  # 缺 quote_span
+        )
+    assert "missing quote_span" in str(exc.value)
+    assert exc.value.hint and "quote_span" in exc.value.hint
+
+
+def test_update_concept_add_links_validates(db: Path, staged_source: str):
+    from corpus_bot.storage import update_concept, write_concept
+    write_concept(
+        db, slug="v", title="V", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
+        links=[],
+    )
+    with pytest.raises(StorageError) as exc:
+        update_concept(db, slug="v", add_links=["Bad_Slug"])
+    assert "slug-safe" in str(exc.value).lower()
+
+
+def test_write_concept_validates_links(db: Path, staged_source: str):
+    from corpus_bot.storage import write_concept
+    with pytest.raises(StorageError) as exc:
+        write_concept(
+            db, slug="x", title="X", body="b",
+            extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
+            links=["x"],  # self-ref
+        )
+    assert "self-reference" in str(exc.value).lower()

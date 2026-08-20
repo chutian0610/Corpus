@@ -154,7 +154,9 @@ error: <message>
 - `vault does not exist` → 先 `corpus-bot vault init`
 - `duplicate content already staged as ...` → 该 source_id 已存在，跳过
 - `duplicate content exists but is deleted: ...` → 同 hash 已 soft-deleted,加 `--force-revive` 复活
-- `concept slug already exists` → 用 `concepts update` 而非 `write
+- `concept slug already exists` → 用 `concepts update` 而非 `write`
+- `link cannot be self-reference` → concept 不能 wikilink 自己
+- `link not slug-safe` → links 必须是合法 slug (小写字母数字+连字符)
 - `score must be in [0, 1]` → 0-1 之间的数
 
 sources.batch 的每个 result 也带 `hint` 字段 (deleted 行未带 `--force-revive` 时填)。
@@ -219,6 +221,10 @@ corpus-bot sources delete <vault> <sid> --yes --reason version-update
 | `vault stats <path>` / `stats <path>` | source/concept 统计 + 认证覆盖率 |
 | `sources ingest <vault> <file>` | 单文件入库（content-hash dedup + `-ingest-<ts>` 后缀）|
 | `sources ingest ... --force-revive` | 同 hash 已 soft-deleted → 复活该 source_id |
+| `concepts write <vault> ...` | 写 concept (必传 --extractions, 每个 source 一段 quote_span) |
+| `concepts update <vault> <slug> --body ... --add-extractions ...` | 增量更新 (改 title/body + 加 extraction/link) |
+| `concepts delete <vault> <slug>` | 删 concept (默认 dry-run, --no-dry-run 真删, 同步清 wiki 文件) |
+| `concepts list ... --orphans` / `--certified` / `--uncertified` | 过滤 (--certified 与 --uncertified 互斥) |
 | `sources batch <vault> <dir> [--glob]` | 批量入库 |
 | `sources list <vault> [--status]` | 列源 |
 | `sources show <vault> <source_id>` | 看源元数据 |
