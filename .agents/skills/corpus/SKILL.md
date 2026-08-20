@@ -27,30 +27,12 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 
 **关键**：corpus 不调任何 LLM。LLM 调用全在 agent 端。
 
-## 环境前置
-
-corpus 已发布为 entry point (`pip install -e .` / `uv tool install -e .`)，agent 直接调 `corpus` 命令。
-
-```bash
-# 验证可用性（agent 第一步应该跑）
-corpus --version
-# corpus, version 0.2.0
-
-# 没装时, 用户/agent 跑 (在项目根):
-uv tool install -e .     # 推荐 (隔离)
-# 或
-pip install -e .         # 需要 venv
-```
-
-**不要用** `python3 -m corpus_bot` (legacy, 不再推荐)。SKILL.md 所有示例都假定 `corpus` 在 PATH 里。
-
-`vault init <path>` 等价 mkdir -p, vault root 不存在会自动建, 不需要先 mkdir。
-
 ## Quick Start（agent 视角）
 
 ```bash
-# 1. 初始化 vault（一次性）
-corpus vault init ~/my-wiki
+# 1. 初始化 vault（一次性, 用 corpus-init skill）
+#    触发条件: "建 vault" / "vault init" / corpus --version 失败等
+#    -> 加载 .agents/skills/corpus-init/SKILL.md
 
 # 2. 落源（content-hash dedup，所有 ingest 都加 `-ingest-<UTC compact ISO>` 后缀；软删复活用 --force-revive）
 corpus sources ingest ~/my-wiki ~/notes/postgresql.md
