@@ -31,7 +31,16 @@ corpus --version
 # expect: corpus, version 0.2.0
 ```
 
-If it fails, install via `uv tool install -e .` from the project root (or `./scripts/install.sh`).
+If it fails, install via `pip install corpus` (从 PyPI 装, 不在项目根).
+
+**git 命令检查** (强制):
+
+```bash
+git --version
+# expect: git version 2.x+
+```
+
+如果 git 不可用, 告诉用户: "corpus vault init 需要 git 装在 PATH 里 (macOS: brew install git; Linux: apt install git / yum install git; Windows: https://git-scm.com/download/win)". 跟 corpus 命令本身无关, 是 vault 强制的设计选择.
 
 ## Step 1 — Ask user for vault name
 

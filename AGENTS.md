@@ -70,11 +70,15 @@ corpus 通过 `[project.scripts]` 注册为 `corpus` 全局命令。
 corpus --version
 # corpus, version 0.2.0
 
-# 本地开发 (项目根):
-uv tool install -e .    # 推荐 (隔离)
-# 或 pip install -e .  (需要 venv)
+# 安装 (PyPI 发布后):
+pip install corpus   # 从 PyPI 装
+# 或 uv tool install corpus  (uv 隔离)
 
-# 不要用 PYTHONPATH=src python3 -m corpus_bot (legacy 路径, 不再推荐)
+# 开发期本地源码安装 (项目根):
+uv tool install -e .   # editable, 改了 src/ 立即生效
+
+# git 命令必须装 (vault 强制 git init): macOS brew install git, Linux apt/yum install git
+
 ```
 
 `vault init <path>` 等价 `mkdir -p`, vault root 不存在会自动建。
