@@ -33,24 +33,24 @@ corpus --version
 
 If it fails, install via `uv tool install -e .` from the project root (or `./scripts/install.sh`).
 
-## Step 1 — Pick a vault name (relative to cwd)
+## Step 1 — Ask user for vault name
 
-默认在 agent 当前 cwd 下创建知识库, 所以只需指定一个 vault 名字:
+**不要预设名字, 必须主动问用户**. 例:
+
+> "请提供新 vault 的名字 (slug-safe, 例 my-project / postgres-notes / team-wiki)"
+
+vault 名建议:
+- 小写字母 + 数字 + 连字符 (slug-safe, 例 `team-wiki-2026`)
+- 不与 cwd 下已有目录冲突
+- 不含路径分隔符 (agent 会自动把 name 当成 cwd 下的子目录名)
+
+如果 vault 落在 git 仓库里, 提示用户把 `<vault_name>/` 加到 `.gitignore` (这是项目层决定, agent 不假设).
+
+## Step 2 — Initialize (cwd 下创建 <vault_name>/)
 
 ```bash
-# 在项目根 (agent 通常 cwd 是这里), vault 命名为 "<project-name>"
-corpus vault init .corpus/<project-name> --json
-# 实际例子: corpus vault init .corpus/my-project --json
-```
-
-vault root 不存在会自动 `mkdir -p`. 不要硬编码绝对路径, 这样 agent 在不同项目里都能用同样的命令.
-
-如果 vault 落在 git 仓库里 (例如 `.corpus/`), 确认 `.corpus/` 在 `.gitignore` (默认项目里已经有).
-
-## Step 2 — Initialize
-
-```bash
-corpus vault init <vault_path> --json
+corpus vault init <vault_name> --json
+# 实际例子: corpus vault init my-project --json
 ```
 
 Idempotent. Running on an existing vault returns schema info without errors. The vault root is created if missing (`mkdir -p` semantics).
@@ -110,7 +110,9 @@ Expect:
 
 After `vault init` succeeds:
 
-- **Ingest sources**: `corpus sources ingest <vault> <external-file>` (see main `corpus` skill)
-- **Batch ingest**: `corpus sources batch <vault> <dir> --glob "*.md"`
-- **Read raw paths**: `corpus vault info <vault> --json` shows the canonical paths
-- **Stats baseline**: `corpus stats <vault> --json` (will show `total_sources: 0` initially)
+- **Ingest sources**: ```bash
+corpus sources ingest <vault_name> <external-file>      # see main corpus skill
+corpus sources batch <vault_name> <dir> --glob "*.md"
+corpus vault info <vault_name> --json                    # 看 canonical paths
+corpus stats <vault_name> --json                        # baseline (total_sources: 0)
+```
