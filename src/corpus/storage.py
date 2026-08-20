@@ -1847,11 +1847,13 @@ def list_concepts(
     offset: int = 0,
     is_orphan: bool | None = None,
     is_certified: bool | None = None,
+    status: str | None = None,
 ) -> list[dict[str, Any]]:
     """列 concept.
 
     is_orphan:    None=全部, True=仅孤儿, False=仅非孤儿
     is_certified: None=全部, True=仅已认证, False=仅未认证
+    status:      None=全部, 'draft' / 'evergreen' / 'stale' 过滤 (schema v5)
     """
     where_clauses: list[str] = []
     params: list[Any] = []
@@ -1863,6 +1865,9 @@ def list_concepts(
             where_clauses.append("certified_at IS NOT NULL")
         else:
             where_clauses.append("certified_at IS NULL")
+    if status is not None:
+        where_clauses.append("status=?")
+        params.append(status)
     sql = "SELECT * FROM concepts"
     if where_clauses:
         sql += " WHERE " + " AND ".join(where_clauses)
@@ -1972,14 +1977,32 @@ def dedup_candidate_scores(
     target_slug = slugify(link_target)
     target_lower = link_target.lower().strip()
     with connect(db_path) as conn:
-        rows = conn.execute("SELECT slug, title, source_ids FROM concepts").fetchall()
+        rows = conn.execute("SELECT slug, title, source_ids, aliases FROM concepts").fetchall()
     candidates: list[dict[str, Any]] = []
     for r in rows:
         slug = r["slug"]
         title = r["title"] or ""
         source_ids = _parse_json_list(r["source_ids"])
+        aliases = _parse_json_list(r["aliases"] or "[]")
+        # aliases 匹配 (schema v5: 'MVCC' -> postgresql-mvcc)
+        alias_match = False
+        for alias in aliases:
+            alias_slug = slugify(alias)
+            if alias_slug == target_slug:
+                alias_match = "exact"
+                break
+            if target_slug and (alias_slug.startswith(target_slug) or target_slug in alias_slug):
+                alias_match = "partial"
+                break
+            if target_lower and target_lower in alias.lower():
+                alias_match = "partial"
+                break
         if slug == target_slug:
             discrete = 1.0
+        elif alias_match == "exact":
+            discrete = 0.95  # alias exact match, 仅次于 slug exact
+        elif alias_match == "partial":
+            discrete = 0.6  # alias 部分匹配
         elif slug.startswith(target_slug):
             discrete = 0.9
         elif target_slug and target_slug in slug:

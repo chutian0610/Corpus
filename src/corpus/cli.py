@@ -853,12 +853,14 @@ def concepts_show(vault_path: Path, slug: str, as_json: bool) -> None:
 @click.option("--orphans", "orphans_only", is_flag=True, help="只看 orphan (无 source_ids)")
 @click.option("--certified", "certified_only", is_flag=True, help="只看已认证")
 @click.option("--uncertified", "uncertified_only", is_flag=True, help="只看未认证")
+@click.option("--status", type=click.Choice(["draft", "evergreen", "stale"]), default=None,
+              help="按 status 过滤 (schema v5)")
 @click.option("--limit", type=int, default=50)
 @click.option("--offset", type=int, default=0)
 @click.option("--json", "as_json", is_flag=True)
 def concepts_list(
     vault_path: Path, orphans_only: bool, certified_only: bool, uncertified_only: bool,
-    limit: int, offset: int, as_json: bool,
+    status: str | None, limit: int, offset: int, as_json: bool,
 ) -> None:
     if certified_only and uncertified_only:
         _err("--certified and --uncertified are mutually exclusive")
@@ -867,6 +869,7 @@ def concepts_list(
         paths["corpus_db"], limit=limit, offset=offset,
         is_orphan=True if orphans_only else None,
         is_certified=True if certified_only else (False if uncertified_only else None),
+        status=status,
     )
     _emit(items, as_json=as_json)
 

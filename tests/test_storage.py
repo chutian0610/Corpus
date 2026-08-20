@@ -1504,3 +1504,40 @@ def test_restore_from_files_v4_to_v5_picks_up_status_aliases_tags(tmp_path: Path
     assert info["status"] == "evergreen"
     assert info["aliases"] == ["alias1"]
     assert info["tags"] == ["t1", "t2"]
+
+
+def test_list_concepts_status_filter(db: Path, staged_source: str):
+    """list_concepts is_status filter (schema v5)."""
+    from corpus.storage import list_concepts, write_concept
+    write_concept(
+        db, slug="draft-c", title="Draft", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+        status="draft",
+    )
+    write_concept(
+        db, slug="evergreen-c", title="Evergreen", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+        status="evergreen",
+    )
+    all_concepts = list_concepts(db)
+    assert {c["slug"] for c in all_concepts} == {"draft-c", "evergreen-c"}
+    drafts = list_concepts(db, status="draft")
+    assert {c["slug"] for c in drafts} == {"draft-c"}
+    evergreens = list_concepts(db, status="evergreen")
+    assert {c["slug"] for c in evergreens} == {"evergreen-c"}
+
+
+def test_find_concept_by_link_matches_aliases(db: Path, staged_source: str):
+    """find_concept_by_link 'MVCC' 找 postgresql-mvcc (via aliases, schema v5)."""
+    from corpus.storage import find_concept_by_link, write_concept
+    write_concept(
+        db, slug="postgresql-mvcc", title="PG MVCC", body="b",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+        aliases=["MVCC", "多版本并发"],
+    )
+    # 精确 alias 匹配
+    candidates = find_concept_by_link(db, "MVCC")
+    assert any(c["slug"] == "postgresql-mvcc" for c in candidates)
+    # 部分 alias 匹配 (中文)
+    candidates = find_concept_by_link(db, "多版本并发")
+    assert any(c["slug"] == "postgresql-mvcc" for c in candidates)
