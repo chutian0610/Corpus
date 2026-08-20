@@ -7,8 +7,8 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from corpus_bot.cli import cli
-from corpus_bot.errors import ConflictError, ValidationError
+from corpus.cli import cli
+from corpus.errors import ConflictError, ValidationError
 
 
 @pytest.fixture
@@ -25,8 +25,8 @@ def vault(tmp_path: Path, external: Path) -> Path:
     v = tmp_path / "vault"
     (v / "raw").mkdir(parents=True)
     # vault init 会建 wiki/ .wiki-meta/
-    from corpus_bot.vault import ensure_vault, vault_paths
-    from corpus_bot.storage import init_db
+    from corpus.vault import ensure_vault, vault_paths
+    from corpus.storage import init_db
     ensure_vault(v)
     init_db(vault_paths(v)["corpus_db"])
     return v
@@ -100,7 +100,7 @@ def test_ingest_collision_same_content_keeps_name(vault: Path, external: Path):
 
 def test_ingest_revive_deleted_source(vault: Path, external: Path):
     """soft_delete 后再 ingest 同内容 + --force-revive → 复活, 保留 sid."""
-    from corpus_bot.storage import soft_delete_source
+    from corpus.storage import soft_delete_source
 
     r = _runner()
     (external / "x.md").write_text("same content", encoding="utf-8")
@@ -136,7 +136,7 @@ def test_ingest_revive_deleted_source(vault: Path, external: Path):
 
 def test_ingest_revive_then_relist_as_staged(vault: Path, external: Path):
     """复活后 list 能看到 status=staged."""
-    from corpus_bot.storage import soft_delete_source, read_source
+    from corpus.storage import soft_delete_source, read_source
 
     r = _runner()
     (external / "y.md").write_text("y content", encoding="utf-8")
@@ -156,7 +156,7 @@ def test_ingest_revive_then_relist_as_staged(vault: Path, external: Path):
 
 def test_batch_renames_and_counts_revived(vault: Path):
     """batch: 撞名改名 + 复活 计数都正确."""
-    from corpus_bot.storage import soft_delete_source, read_source, stage_source
+    from corpus.storage import soft_delete_source, read_source, stage_source
 
     r = _runner()
     db = vault / ".wiki-meta" / "corpus.db"
@@ -193,7 +193,7 @@ def test_batch_renames_and_counts_revived(vault: Path):
 
 def test_batch_without_revive_flags_deleted_as_failed(vault: Path):
     """batch 不带 --force-revive, 同 hash 已 deleted → failed, 给出 hint."""
-    from corpus_bot.storage import soft_delete_source, stage_source
+    from corpus.storage import soft_delete_source, stage_source
 
     r = _runner()
     db = vault / ".wiki-meta" / "corpus.db"
@@ -220,7 +220,7 @@ def test_batch_without_revive_flags_deleted_as_failed(vault: Path):
 
 def test_concepts_list_orphans_filter(vault: Path, external: Path):
     """--orphans 只返回 source_ids=[] 的 concept."""
-    from corpus_bot.storage import write_concept, init_db
+    from corpus.storage import write_concept, init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
 
     # 需要先 ingest 一个 source 给非 orphan concept
@@ -244,7 +244,7 @@ def test_concepts_list_orphans_filter(vault: Path, external: Path):
 
 def test_concepts_list_certified_filters(vault: Path, external: Path):
     """--certified / --uncertified 互斥, 默认无过滤."""
-    from corpus_bot.storage import write_concept, mark_certified, init_db
+    from corpus.storage import write_concept, mark_certified, init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
     (external / "x.md").write_text("a", encoding="utf-8")
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
@@ -272,7 +272,7 @@ def test_concepts_list_certified_filters(vault: Path, external: Path):
 
 def test_concepts_update_changes_body_and_adds_source(vault: Path, external: Path):
     """update: --body 覆盖, --add-extractions 加新 source, --add-links 加新 link."""
-    from corpus_bot.storage import init_db, read_concept
+    from corpus.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
 
     # 准备两个 source
@@ -317,7 +317,7 @@ def test_concepts_update_changes_body_and_adds_source(vault: Path, external: Pat
 
 def test_concepts_update_rejects_self_link(vault: Path, external: Path):
     """update 加 link 含自引用应拒绝."""
-    from corpus_bot.storage import init_db
+    from corpus.storage import init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
     (external / "x.md").write_text("x", encoding="utf-8")
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
@@ -341,7 +341,7 @@ def test_concepts_update_rejects_self_link(vault: Path, external: Path):
 
 def test_concepts_delete_dry_run_then_real(vault: Path, external: Path):
     """默认 dry-run 显示信息, --no-dry-run 真删."""
-    from corpus_bot.storage import init_db, read_concept
+    from corpus.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
     (external / "x.md").write_text("x", encoding="utf-8")
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
@@ -375,14 +375,14 @@ def test_concepts_delete_404_on_unknown(vault: Path):
 
 def test_concepts_write_rolls_back_db_on_wiki_write_failure(vault: Path, external: Path, monkeypatch):
     """wiki 文件写失败时, DB 概念行应被 delete_concept 回滚."""
-    from corpus_bot.storage import init_db, read_concept
+    from corpus.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
     (external / "x.md").write_text("x", encoding="utf-8")
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
 
     # 让 wiki_path.write_text 抛 OSError
-    from corpus_bot import cli as cli_mod
+    from corpus import cli as cli_mod
     real_write_text = type(cli_mod.Path("x")).write_text if False else None
     # 用 monkeypatch patch click.Path 内部 Path.write_text: 替换 Path 的 write_text
     from pathlib import Path as PathCls
@@ -410,7 +410,7 @@ def test_concepts_write_rolls_back_db_on_wiki_write_failure(vault: Path, externa
 
 def test_concepts_remove_extraction_drops_extraction_and_may_orphan(vault: Path, external: Path):
     """remove-extraction: 撤唯一抽取 → concept is_orphan=1."""
-    from corpus_bot.storage import init_db, read_concept
+    from corpus.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
     (external / "x.md").write_text("x", encoding="utf-8")
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
@@ -448,7 +448,7 @@ def test_concepts_remove_extraction_404(vault: Path):
 
 def test_concepts_certify_partial_keeps_old_score(vault: Path, external: Path):
     """certify --issues 只改 issues, score 保留."""
-    from corpus_bot.storage import init_db, read_concept
+    from corpus.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
     (external / "x.md").write_text("x", encoding="utf-8")
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
@@ -477,7 +477,7 @@ def test_concepts_certify_partial_keeps_old_score(vault: Path, external: Path):
 
 
 def test_concepts_certify_no_fields_errors(vault: Path, external: Path):
-    from corpus_bot.storage import init_db
+    from corpus.storage import init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
     (external / "x.md").write_text("x", encoding="utf-8")
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
@@ -497,7 +497,7 @@ def test_concepts_certify_no_fields_errors(vault: Path, external: Path):
 
 def test_concepts_certify_first_time_requires_score(vault: Path, external: Path):
     """首次认证必须 --score."""
-    from corpus_bot.storage import init_db
+    from corpus.storage import init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
     (external / "x.md").write_text("x", encoding="utf-8")
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
@@ -518,7 +518,7 @@ def test_concepts_certify_first_time_requires_score(vault: Path, external: Path)
 
 def test_find_by_link_returns_match_score_sorted(vault: Path, external: Path):
     """find-by-link 返回按 match_score DESC 排序, 含 score 字段."""
-    from corpus_bot.storage import init_db, write_concept
+    from corpus.storage import init_db, write_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
     (external / "x.md").write_text("x", encoding="utf-8")
     res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])

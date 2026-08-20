@@ -89,7 +89,7 @@ if uv run --python "$PYTHON" --with pytest pytest tests/ -q --no-header 2>&1 | t
   echo "==> 完成. 下一步:"
   echo "   corpus vault init <path>           # 建 vault"
   echo "   corpus sources ingest <vault> <file>  # 入原材料 (vault 外)"
-  echo "   详细用法: cat .agents/skills/corpus-bot/SKILL.md"
+  echo "   详细用法: cat .agents/skills/corpus/SKILL.md"
 else
   echo "!! 测试失败, install 可能不完整. 跑 'uv tool uninstall corpus-bot && ./scripts/install.sh' 重试"
   exit 1

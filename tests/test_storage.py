@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from corpus_bot.storage import (
+from corpus.storage import (
     init_db,
     stage_source,
     commit_source,
@@ -29,7 +29,7 @@ from corpus_bot.storage import (
     get_concept_evidence_summary,
     export_index,
 )
-from corpus_bot.errors import ConflictError, StorageError
+from corpus.errors import ConflictError, StorageError
 
 
 @pytest.fixture
@@ -416,7 +416,7 @@ def test_update_concept_add_extractions(db: Path):
 
 def test_stage_source_revives_deleted_when_flag_set(db: Path):
     """soft_delete 后再 stage 同内容 + revive_on_deleted=True → 复用 sid, status=staged."""
-    from corpus_bot.storage import soft_delete_source
+    from corpus.storage import soft_delete_source
     raw = Path("/tmp/raw/rev.md")
     result1 = stage_source(db, raw_path=raw, content="same content", original_filename="rev.md")
     sid1 = result1["source_id"]
@@ -442,7 +442,7 @@ def test_stage_source_revives_deleted_when_flag_set(db: Path):
 
 def test_stage_source_deleted_without_flag_raises(db: Path):
     """deleted 同 hash 不带 revive flag → ConflictError, hint 提示 --force-revive."""
-    from corpus_bot.storage import soft_delete_source
+    from corpus.storage import soft_delete_source
     result = stage_source(db, raw_path=Path("/tmp/raw/x.md"), content="foo", original_filename="x.md")
     soft_delete_source(db, result["source_id"], deleted_reason="oops")
     with pytest.raises(ConflictError) as exc:
@@ -534,7 +534,7 @@ def test_init_db_idempotent_on_v2(tmp_path: Path):
 # ---------- delete_concept ----------
 
 def test_delete_concept_removes_concept_and_extractions_and_links(db: Path, staged_source: str):
-    from corpus_bot.storage import delete_concept, write_concept, read_concept
+    from corpus.storage import delete_concept, write_concept, read_concept
     write_concept(
         db, slug="kill-me", title="K", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "quote here"}],
@@ -556,7 +556,7 @@ def test_delete_concept_removes_concept_and_extractions_and_links(db: Path, stag
 
 
 def test_delete_concept_raises_on_unknown_slug(db: Path):
-    from corpus_bot.storage import delete_concept
+    from corpus.storage import delete_concept
     with pytest.raises(StorageError) as exc:
         delete_concept(db, "nope")
     assert "concept not found" in str(exc.value)
@@ -564,7 +564,7 @@ def test_delete_concept_raises_on_unknown_slug(db: Path):
 
 def test_delete_concept_does_not_touch_sources(db: Path, staged_source: str):
     """删 concept 不应影响 source 表 (source 仍可被其它 concept 引用)."""
-    from corpus_bot.storage import delete_concept, write_concept, read_source
+    from corpus.storage import delete_concept, write_concept, read_source
     write_concept(
         db, slug="a", title="A", body="a",
         extractions_data=[{"source_id": staged_source, "quote_span": "x"}],
@@ -577,7 +577,7 @@ def test_delete_concept_does_not_touch_sources(db: Path, staged_source: str):
 # ---------- list_concepts is_certified filter ----------
 
 def test_list_concepts_is_certified_filter(db: Path, staged_source: str):
-    from corpus_bot.storage import write_concept, mark_certified, list_concepts
+    from corpus.storage import write_concept, mark_certified, list_concepts
     write_concept(
         db, slug="certed", title="C", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
@@ -601,13 +601,13 @@ def test_list_concepts_is_certified_filter(db: Path, staged_source: str):
 # ---------- _validate_links ----------
 
 def test_validate_links_dedups(db: Path):
-    from corpus_bot.storage import _validate_links
+    from corpus.storage import _validate_links
     out = _validate_links("self", ["a", "b", "a", "c", "b"])
     assert out == ["a", "b", "c"]
 
 
 def test_validate_links_rejects_self_reference(db: Path):
-    from corpus_bot.storage import _validate_links
+    from corpus.storage import _validate_links
     with pytest.raises(StorageError) as exc:
         _validate_links("foo", ["bar", "foo"])
     assert "self-reference" in str(exc.value).lower()
@@ -615,7 +615,7 @@ def test_validate_links_rejects_self_reference(db: Path):
 
 
 def test_validate_links_rejects_non_slug_safe(db: Path):
-    from corpus_bot.storage import _validate_links
+    from corpus.storage import _validate_links
     with pytest.raises(StorageError) as exc:
         _validate_links("a", ["Bad_Slug", "ok-slug"])
     assert "slug-safe" in str(exc.value).lower()
@@ -623,7 +623,7 @@ def test_validate_links_rejects_non_slug_safe(db: Path):
 
 
 def test_validate_links_skips_empty(db: Path):
-    from corpus_bot.storage import _validate_links
+    from corpus.storage import _validate_links
     assert _validate_links("a", ["", "  ", "ok"]) == ["ok"]
 
 
@@ -631,7 +631,7 @@ def test_validate_links_skips_empty(db: Path):
 
 def test_update_concept_requires_quote_span(db: Path, staged_source: str):
     """与 write_concept 一致: add_extractions 必须带 quote_span."""
-    from corpus_bot.storage import update_concept, write_concept
+    from corpus.storage import update_concept, write_concept
     write_concept(
         db, slug="u", title="U", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
@@ -647,7 +647,7 @@ def test_update_concept_requires_quote_span(db: Path, staged_source: str):
 
 
 def test_update_concept_add_links_validates(db: Path, staged_source: str):
-    from corpus_bot.storage import update_concept, write_concept
+    from corpus.storage import update_concept, write_concept
     write_concept(
         db, slug="v", title="V", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
@@ -659,7 +659,7 @@ def test_update_concept_add_links_validates(db: Path, staged_source: str):
 
 
 def test_write_concept_validates_links(db: Path, staged_source: str):
-    from corpus_bot.storage import write_concept
+    from corpus.storage import write_concept
     with pytest.raises(StorageError) as exc:
         write_concept(
             db, slug="x", title="X", body="b",
@@ -673,7 +673,7 @@ def test_write_concept_validates_links(db: Path, staged_source: str):
 
 def test_remove_extraction_drops_row_and_syncs_source_ids(db: Path, staged_source: str):
     """删唯一 extraction → concept.source_ids 也移除该 sid, is_orphan=1."""
-    from corpus_bot.storage import remove_extraction, write_concept, read_concept
+    from corpus.storage import remove_extraction, write_concept, read_concept
     res = write_concept(
         db, slug="r1", title="R1", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
@@ -692,7 +692,7 @@ def test_remove_extraction_drops_row_and_syncs_source_ids(db: Path, staged_sourc
 
 def test_remove_extraction_keeps_source_id_when_others_exist(db: Path, staged_source: str):
     """同 (concept, source) 多次抽取, 删一条 → source_id 仍在 (还有别的 extractions 引用)."""
-    from corpus_bot.storage import remove_extraction, update_concept, write_concept, read_concept
+    from corpus.storage import remove_extraction, update_concept, write_concept, read_concept
     res = write_concept(
         db, slug="r2", title="R2", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "q1"}], links=[],
@@ -709,7 +709,7 @@ def test_remove_extraction_keeps_source_id_when_others_exist(db: Path, staged_so
 
 
 def test_remove_extraction_404(db: Path):
-    from corpus_bot.storage import remove_extraction
+    from corpus.storage import remove_extraction
     with pytest.raises(StorageError) as exc:
         remove_extraction(db, "nonexistent")
     assert "extraction not found" in str(exc.value)
@@ -718,7 +718,7 @@ def test_remove_extraction_404(db: Path):
 # ---------- mark_certified partial update (P2) ----------
 
 def test_mark_certified_first_time_requires_score(db: Path, staged_source: str):
-    from corpus_bot.storage import write_concept, mark_certified
+    from corpus.storage import write_concept, mark_certified
     write_concept(
         db, slug="p", title="P", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
@@ -730,7 +730,7 @@ def test_mark_certified_first_time_requires_score(db: Path, staged_source: str):
 
 
 def test_mark_certified_no_fields_raises(db: Path, staged_source: str):
-    from corpus_bot.storage import write_concept, mark_certified
+    from corpus.storage import write_concept, mark_certified
     write_concept(
         db, slug="p2", title="P2", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
@@ -744,7 +744,7 @@ def test_mark_certified_no_fields_raises(db: Path, staged_source: str):
 
 def test_mark_certified_partial_keeps_old_fields(db: Path, staged_source: str):
     """只传 --issues, 旧 score 和 suggestions 应保留."""
-    from corpus_bot.storage import write_concept, mark_certified, read_concept
+    from corpus.storage import write_concept, mark_certified, read_concept
     write_concept(
         db, slug="p3", title="P3", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
@@ -763,7 +763,7 @@ def test_mark_certified_partial_keeps_old_fields(db: Path, staged_source: str):
 
 
 def test_mark_certified_partial_score_only(db: Path, staged_source: str):
-    from corpus_bot.storage import write_concept, mark_certified
+    from corpus.storage import write_concept, mark_certified
     write_concept(
         db, slug="p4", title="P4", body="b",
         extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
@@ -778,7 +778,7 @@ def test_mark_certified_partial_score_only(db: Path, staged_source: str):
 # ---------- find_concept_by_link scoring (P2) ----------
 
 def test_find_concept_by_link_match_score_exact(db: Path, staged_source: str):
-    from corpus_bot.storage import write_concept, find_concept_by_link
+    from corpus.storage import write_concept, find_concept_by_link
     write_concept(
         db, slug="postgresql-mvcc", title="PostgreSQL MVCC", body="",
         extractions_data=[_make_extraction(staged_source)], links=[],
@@ -790,7 +790,7 @@ def test_find_concept_by_link_match_score_exact(db: Path, staged_source: str):
 
 
 def test_find_concept_by_link_match_score_prefix_contains_title(db: Path, staged_source: str):
-    from corpus_bot.storage import write_concept, find_concept_by_link
+    from corpus.storage import write_concept, find_concept_by_link
     # slug 短, 是其他 slug 的前缀
     write_concept(
         db, slug="postgres", title="Postgres Overview", body="",
@@ -812,7 +812,7 @@ def test_find_concept_by_link_match_score_prefix_contains_title(db: Path, staged
 
 
 def test_find_concept_by_link_title_only_match(db: Path, staged_source: str):
-    from corpus_bot.storage import write_concept, find_concept_by_link
+    from corpus.storage import write_concept, find_concept_by_link
     write_concept(
         db, slug="mvcc-deep-dive", title="Deep dive into PostgreSQL WAL", body="",
         extractions_data=[_make_staged() if False else _make_extraction(staged_source)], links=[],
@@ -825,7 +825,7 @@ def test_find_concept_by_link_title_only_match(db: Path, staged_source: str):
 
 
 def test_find_concept_by_link_unrelated_filtered(db: Path, staged_source: str):
-    from corpus_bot.storage import write_concept, find_concept_by_link
+    from corpus.storage import write_concept, find_concept_by_link
     write_concept(
         db, slug="kafka", title="Apache Kafka", body="",
         extractions_data=[_make_extraction(staged_source)], links=[],

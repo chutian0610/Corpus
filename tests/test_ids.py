@@ -1,6 +1,6 @@
 """ID 与 content-hash 测试。"""
 
-from corpus_bot.ids import (
+from corpus.ids import (
     source_id_from_content,
     slugify,
     rename_suffix,

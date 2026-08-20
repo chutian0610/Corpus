@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from corpus_bot.vault import ensure_vault, validate_source_path
-from corpus_bot.errors import ValidationError, ConfigError
+from corpus.vault import ensure_vault, validate_source_path
+from corpus.errors import ValidationError, ConfigError
 
 
 @pytest.fixture
@@ -79,7 +79,7 @@ _INGEST_RE = _re.compile(r"ingest-\d{8}-\d{6}")
 
 def test_pick_raw_target_always_adds_ingest_suffix(vault: Path):
     """无论 raw/ 下是否存在, 都生成 <stem>-ingest-<UTC compact ISO><suffix>."""
-    from corpus_bot.vault import pick_raw_target
+    from corpus.vault import pick_raw_target
     target = pick_raw_target(vault / "raw", "any content", "note.md")
     assert target.parent == vault / "raw"
     assert _INGEST_RE.search(target.stem), f"no ingest suffix in {target.name}"
@@ -89,7 +89,7 @@ def test_pick_raw_target_always_adds_ingest_suffix(vault: Path):
 
 def test_pick_raw_target_same_stem_different_calls_yields_unique_paths(vault: Path):
     """连续两次调用生成不同 ingest 后缀 (跨秒不会撞名)."""
-    from corpus_bot.vault import pick_raw_target
+    from corpus.vault import pick_raw_target
     t1 = pick_raw_target(vault / "raw", "content", "note.md")
     t2 = pick_raw_target(vault / "raw", "content", "note.md")
     # 同秒情况下确实可能相等 (人类操作可忽略); 但格式一定对
@@ -99,7 +99,7 @@ def test_pick_raw_target_same_stem_different_calls_yields_unique_paths(vault: Pa
 
 def test_pick_raw_target_preserves_markdown_extension(vault: Path):
     """.markdown 后缀保留, ingest 后缀插在 stem 中间."""
-    from corpus_bot.vault import pick_raw_target
+    from corpus.vault import pick_raw_target
     target = pick_raw_target(vault / "raw", "any", "deep.markdown")
     assert target.suffix == ".markdown"
     assert target.stem.startswith("deep-ingest-")
@@ -107,7 +107,7 @@ def test_pick_raw_target_preserves_markdown_extension(vault: Path):
 
 def test_pick_raw_target_preserves_no_extension(vault: Path):
     """无后缀文件名也保留, ingest 后缀照样加."""
-    from corpus_bot.vault import pick_raw_target
+    from corpus.vault import pick_raw_target
     target = pick_raw_target(vault / "raw", "any", "README")
     assert target.suffix == ""
     assert _INGEST_RE.search(target.stem)
