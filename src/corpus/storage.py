@@ -181,13 +181,23 @@ def _hash(content: bytes) -> str:
 
 
 @contextmanager
-def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """打开 SQLite 连接，自动 foreign keys + autocommit。"""
+def connect(db_path: Path, *, busy_timeout_ms: int = 5000) -> Iterator[sqlite3.Connection]:
+    """打开 SQLite 连接: WAL + autocommit + busy_timeout.
+
+    并发: WAL (一个写者 + 多读者) + busy_timeout=5000ms. SQLite 内部序列化写.
+    物理文件 IO (raw/ wiki/) 由 corpus.lock.vault_file_lock 跨进程保护.
+    """
     if not db_path.parent.exists():
         raise StorageError(f"meta directory missing: {db_path.parent}")
-    conn = sqlite3.connect(str(db_path), isolation_level=None)  # autocommit
-    conn.execute("PRAGMA journal_mode=DELETE")
+    conn = sqlite3.connect(
+        str(db_path),
+        isolation_level=None,  # autocommit
+        timeout=busy_timeout_ms / 1000.0,
+    )
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")  # WAL 模式下推荐
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     conn.row_factory = sqlite3.Row
     try:
         yield conn
