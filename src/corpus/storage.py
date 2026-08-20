@@ -614,17 +614,21 @@ def write_concept(
     prompt_version: str | None = None,
     extracted_by: str = "agent",
 ) -> dict[str, Any]:
-    """写一篇 wiki concept。slug 已存在 → ConflictError。
+    """Idempotent upsert concept: slug 不存在 → INSERT, 存在 → UPDATE 合并 source/links.
 
-    必传 extractions_data：每个 source_id 对应一段 quote_span 证据。
-    格式：[{"source_id": "abc", "quote_span": "...", "char_start": 0, "char_end": 100, "confidence": 0.9}, ...]
-    - source_ids 从 extractions_data 自动推导
-    - 至少 1 个 extraction（无 source 的 concept 不允许）
+    并发: 整个事务包 BEGIN IMMEDIATE + write_with_retry (SQLITE_BUSY 自动 retry).
+    多 agent 并发写同一 slug:
+      - 第一个拿写锁 → SELECT 不存在 → INSERT
+      - 第二个 wait 后拿写锁 → SELECT 存在 → UPDATE 合并 source_ids/links + 新 extraction
+      - 都成功, 不丢数据
 
-    返回：{
-        "concept_id", "slug", "wiki_path",
-        "extraction_ids": [...],
-        "source_ids": [...]
+    必传 extractions_data: 每个 source_id 对应一段 quote_span 证据.
+    - source_ids 从 extractions_data 自动推导, 合并到已有 (不丢)
+    - 至少 1 个 extraction
+
+    返回: {
+        "concept_id", "slug", "source_ids", "extraction_ids",
+        "action": "created" | "updated"
     }
     """
     if not extractions_data:
@@ -650,83 +654,107 @@ def write_concept(
     links = _validate_links(slug, links)
 
     now = _utc_now_iso()
-    cid = _new_uuid12("c_")
-    extraction_ids = []
+    extraction_ids: list[str] = []
 
-    with connect(db_path) as conn:
-        # 1. 校验所有 source_id 存在且不是 deleted
-        for sid in source_ids:
-            row = conn.execute(
-                "SELECT status, content_hash FROM sources WHERE source_id=?", (sid,)
+    with write_with_retry(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # 1. 校验所有 source_id 存在且不是 deleted (在事务内, 防 source 状态 race)
+            for sid in source_ids:
+                row = conn.execute(
+                    "SELECT status, content_hash FROM sources WHERE source_id=?", (sid,)
+                ).fetchone()
+                if not row:
+                    raise StorageError(f"source_id not found: {sid}")
+                if row["status"] == "deleted":
+                    raise ConflictError(
+                        f"cannot write concept from deleted source: {sid}",
+                        hint="deleted sources are immutable; restore is not supported",
+                    )
+
+            # 2. 查 slug 是否已存在 (upsert 决策)
+            existing = conn.execute(
+                "SELECT concept_id, source_ids, links FROM concepts WHERE slug=?",
+                (slug,),
             ).fetchone()
-            if not row:
-                raise StorageError(f"source_id not found: {sid}")
-            if row["status"] == "deleted":
-                raise ConflictError(
-                    f"cannot write concept from deleted source: {sid}",
-                    hint="deleted sources are immutable; restore is not supported",
+
+            if existing is None:
+                # INSERT 路径
+                cid = _new_uuid12("c_")
+                conn.execute(
+                    """INSERT INTO concepts
+                    (concept_id, slug, title, body, source_ids, links, created_at, updated_at, is_orphan)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                    (
+                        cid, slug, title, body,
+                        json.dumps(source_ids), json.dumps(links),
+                        now, now,
+                    ),
+                )
+                action = "created"
+            else:
+                # UPDATE 路径: 合并 source_ids + links, 覆盖 title/body
+                cid = existing["concept_id"]
+                old_source_ids = set(_parse_json_list(existing["source_ids"]))
+                old_links = set(_parse_json_list(existing["links"]))
+                merged_source_ids = sorted(set(source_ids) | old_source_ids)
+                merged_links = sorted(set(links) | old_links)
+                conn.execute(
+                    """UPDATE concepts
+                    SET title=?, body=?, source_ids=?, links=?, updated_at=?, is_orphan=0
+                    WHERE slug=?""",
+                    (
+                        title, body,
+                        json.dumps(merged_source_ids),
+                        json.dumps(merged_links),
+                        now, slug,
+                    ),
+                )
+                action = "updated"
+
+            # 3. 写入 extractions (每次调用都写新行, audit history)
+            for ed in extractions_data:
+                ext_id = _new_uuid12("e_")
+                conn.execute(
+                    """INSERT INTO extractions
+                    (extraction_id, source_id, concept_slug, quote_span,
+                     char_start, char_end, extracted_at, extracted_by,
+                     prompt_version, confidence, source_content_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        ext_id, ed["source_id"], slug, ed["quote_span"],
+                        ed.get("char_start"), ed.get("char_end"),
+                        now, extracted_by, prompt_version,
+                        ed.get("confidence"),
+                        _fetch_source_content_hash(conn, ed["source_id"]),
+                    ),
+                )
+                extraction_ids.append(ext_id)
+
+            # 4. 同步链接表
+            for to_slug in links:
+                conn.execute(
+                    "INSERT OR IGNORE INTO links (from_slug, to_slug) VALUES (?, ?)",
+                    (slug, to_slug),
                 )
 
-        # 2. 写入 concept
-        try:
-            conn.execute(
-                """INSERT INTO concepts
-                (concept_id, slug, title, body, source_ids, links, created_at, updated_at, is_orphan)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
-                (
-                    cid,
-                    slug,
-                    title,
-                    body,
-                    json.dumps(source_ids),
-                    json.dumps(links),
-                    now,
-                    now,
-                ),
-            )
-        except sqlite3.IntegrityError as e:
-            raise ConflictError(
-                f"concept slug already exists: {slug!r}",
-                hint="use update_concept to modify existing, or pick a new slug",
-            ) from e
+            # 5. 拿到最终 source_ids (合并后) 用于返回
+            final_source_ids_row = conn.execute(
+                "SELECT source_ids FROM concepts WHERE slug=?", (slug,)
+            ).fetchone()
+            final_source_ids = _parse_json_list(final_source_ids_row["source_ids"])
 
-        # 3. 写入 extractions 表
-        for ed in extractions_data:
-            ext_id = _new_uuid12("e_")
-            conn.execute(
-                """INSERT INTO extractions
-                (extraction_id, source_id, concept_slug, quote_span,
-                 char_start, char_end, extracted_at, extracted_by,
-                 prompt_version, confidence, source_content_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    ext_id,
-                    ed["source_id"],
-                    slug,
-                    ed["quote_span"],
-                    ed.get("char_start"),
-                    ed.get("char_end"),
-                    now,
-                    extracted_by,
-                    prompt_version,
-                    ed.get("confidence"),
-                    _fetch_source_content_hash(conn, ed["source_id"]),
-                ),
-            )
-            extraction_ids.append(ext_id)
-
-        # 4. 同步链接表
-        for to_slug in links:
-            conn.execute(
-                "INSERT OR IGNORE INTO links (from_slug, to_slug) VALUES (?, ?)",
-                (slug, to_slug),
-            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     return {
         "concept_id": cid,
         "slug": slug,
-        "source_ids": source_ids,
+        "source_ids": final_source_ids,
         "extraction_ids": extraction_ids,
+        "action": action,
     }
 
 
