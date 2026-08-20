@@ -61,6 +61,24 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 
 当前 28 个 test case 覆盖 ids / vault 七条校验 / storage 五张表。
 
+## 环境前置
+
+corpus-bot 通过 `[project.scripts]` 注册为 `corpus-bot` 全局命令。
+
+```bash
+# 验证安装
+corpus-bot --version
+# corpus-bot, version 0.2.0
+
+# 本地开发 (项目根):
+uv tool install -e .    # 推荐 (隔离)
+# 或 pip install -e .  (需要 venv)
+
+# 不要用 PYTHONPATH=src python3 -m corpus_bot (legacy 路径, 不再推荐)
+```
+
+`vault init <path>` 等价 `mkdir -p`, vault root 不存在会自动建。
+
 ## 代码地图
 
 | 模块 | 职责 |

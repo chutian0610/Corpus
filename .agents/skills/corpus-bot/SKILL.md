@@ -27,6 +27,25 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 
 **关键**：corpus-bot 不调任何 LLM。LLM 调用全在 agent 端。
 
+## 环境前置
+
+corpus-bot 已发布为 entry point (`pip install -e .` / `uv tool install -e .`)，agent 直接调 `corpus-bot` 命令。
+
+```bash
+# 验证可用性（agent 第一步应该跑）
+corpus-bot --version
+# corpus-bot, version 0.2.0
+
+# 没装时, 用户/agent 跑 (在项目根):
+uv tool install -e .     # 推荐 (隔离)
+# 或
+pip install -e .         # 需要 venv
+```
+
+**不要用** `python3 -m corpus_bot` (legacy, 不再推荐)。SKILL.md 所有示例都假定 `corpus-bot` 在 PATH 里。
+
+`vault init <path>` 等价 mkdir -p, vault root 不存在会自动建, 不需要先 mkdir。
+
 ## Quick Start（agent 视角）
 
 ```bash
@@ -230,7 +249,7 @@ corpus-bot sources delete <vault> <sid> --yes --reason version-update
 | `concepts list ... --orphans` / `--certified` / `--uncertified` | 过滤 (--certified 与 --uncertified 互斥) |
 | `concepts remove-extraction <vault> <extraction_id>` | 细粒度撤一次抽取 (自动 sync concept.source_ids / is_orphan) |
 | `concepts find-by-link ...` | 返回含 `match_score` 字段 (1.0 exact / 0.9 startswith / 0.5 contains / 0.4 title), 按 score DESC 排 |
-| `concepts certify ... --score X --issues "..."` | 首次认证必传 `--score`; 后续 partial 可省, 传 "" 清空 list |
+| `concepts certify ... --score X --issues "..."` | 首次认证必传 `--score`; 后续 partial 可省 (score/issues/suggestions 都 None=保留); 传 `""` 清空 list; 全 None 报 `no fields to update` |
 | `sources batch <vault> <dir> [--glob]` | 批量入库 |
 | `sources list <vault> [--status]` | 列源 |
 | `sources show <vault> <source_id>` | 看源元数据 |
@@ -243,3 +262,7 @@ corpus-bot sources delete <vault> <sid> --yes --reason version-update
 | `concepts uncertified <vault>` | 待认证 list |
 | `concepts certify <vault> <slug> --score X --issues ... --suggestions ...` | 标记已认证 |
 | `concepts unmark <vault> <slug>` | 撤销认证 |
+| `concepts evidence <vault> <slug> [--source-id SID]` | 查抽取证据 (quote_span + agent + prompt + time) |
+| `concepts add-source <vault> <slug> --source-id SID --quote-span "..."` | 给 concept 加一个 source (自动写 extractions + 清 is_orphan) |
+| `concepts remove-source <vault> <slug> --source-id SID` | 从 concept 移除一个 source (自动 is_orphan 同步) |
+| `index sync <vault>` | 导出 wiki/index/concepts.json + sources.json (write/update/delete/remove-extraction 时已自动调, 这是兜底) |
