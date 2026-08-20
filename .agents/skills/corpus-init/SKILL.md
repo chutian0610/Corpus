@@ -33,15 +33,19 @@ corpus --version
 
 If it fails, install via `uv tool install -e .` from the project root (or `./scripts/install.sh`).
 
-## Step 1 — Pick the vault path
+## Step 1 — Pick a vault name (relative to cwd)
 
-| Scenario | Suggested path |
-|---|---|
-| Per-project vault (in a git repo) | `<project>/.corpus/<project-name>/` |
-| Personal scratch vault | `~/corpus/<name>/` |
-| Shared vault across projects | `~/shared-wiki/` or similar (outside any repo) |
+默认在 agent 当前 cwd 下创建知识库, 所以只需指定一个 vault 名字:
 
-If the vault lives **inside a git repo**, ensure `.corpus/` is in `.gitignore` (default `corpus` repo has this).
+```bash
+# 在项目根 (agent 通常 cwd 是这里), vault 命名为 "<project-name>"
+corpus vault init .corpus/<project-name> --json
+# 实际例子: corpus vault init .corpus/my-project --json
+```
+
+vault root 不存在会自动 `mkdir -p`. 不要硬编码绝对路径, 这样 agent 在不同项目里都能用同样的命令.
+
+如果 vault 落在 git 仓库里 (例如 `.corpus/`), 确认 `.corpus/` 在 `.gitignore` (默认项目里已经有).
 
 ## Step 2 — Initialize
 
