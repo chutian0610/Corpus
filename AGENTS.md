@@ -85,10 +85,19 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 
 **关键操作语义**：
 
+- `sources ingest <vault> <file>` / `sources batch`：
+  - content-hash dedup：同 hash 已 active (staged/committed) → `ConflictError` (exit 1)
+  - 同 hash 已 soft-deleted → 默认 `ConflictError` 提示 `--force-revive`；加 flag → 复用原 `source_id`，status='staged'，刷新 `raw_path`/`content_hash`
+  - 撞名检测（`pick_raw_target` in `vault.py`）：raw/ 下同名但 sid 不同 → 自动改名 `<stem>_<unix_ts>_<4hex><ext>`；同 sid → 允许覆写 (idempotent)
 - `sources delete <sid>`（软删）：`status='deleted'`，自动从引用它的 concept.source_ids 移除；**不级联删 concept**
 - 如果删后 concept.source_ids 变空 → 自动 `is_orphan=1`
 - `concepts write --extractions '[...]'`：**强制每个 source 一段 quote_span 原文证据**
 - 同一 (source, concept) 可多次抽取，每次都记 extractions 一行（audit history）
+
+**Schema 版本**：当前 `SCHEMA_VERSION=2`。`init_db()` 检测 `schema_meta` 表：
+- 无记录 → 视为 v1（旧 DDL 含 `UNIQUE(content_hash)`），跑 v1→v2 migration
+- 有记录且 < 当前 → 按 `_MIGRATIONS` dict 顺序跑每一步
+- 新版 DDL 不再有 `UNIQUE(content_hash)`，因为软删后同 hash 复活需要 UNIQUE 不存在；改由 `stage_source()` 在 storage 层查重 + 按 status 决定 raise / revive
 
 ## 行为规范
 

@@ -33,8 +33,10 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 # 1. 初始化 vault（一次性）
 corpus-bot vault init ~/my-wiki
 
-# 2. 落源（content-hash dedup，撞名自动改名）
+# 2. 落源（content-hash dedup，撞名自动改名；软删复活用 --force-revive）
 corpus-bot sources ingest ~/my-wiki ~/notes/postgresql.md
+# 同 hash 已 soft-deleted? 加 --force-revive 复活同一 source_id
+corpus-bot sources ingest --force-revive ~/my-wiki ~/notes/postgresql.md
 # 返回：{"action":"staged","source_id":"d607...","raw_path":"...","size_bytes":187}
 
 # 3. 批量落源
@@ -151,8 +153,11 @@ error: <message>
 常见错误：
 - `vault does not exist` → 先 `corpus-bot vault init`
 - `duplicate content already staged as ...` → 该 source_id 已存在，跳过
+- `duplicate content exists but is deleted: ...` → 同 hash 已 soft-deleted,加 `--force-revive` 复活
 - `concept slug already exists` → 用 `concepts update` 而非 `write
 - `score must be in [0, 1]` → 0-1 之间的数
+
+sources.batch 的每个 result 也带 `hint` 字段 (deleted 行未带 `--force-revive` 时填)。
 
 ## JSON 输出
 
@@ -212,7 +217,8 @@ corpus-bot sources delete <vault> <sid> --yes --reason version-update
 | `vault init <path>` | 创建 vault 目录 + 初始化 SQLite |
 | `vault info <path>` | vault 路径表 + 元信息 |
 | `vault stats <path>` / `stats <path>` | source/concept 统计 + 认证覆盖率 |
-| `sources ingest <vault> <file>` | 单文件入库（content-hash dedup）|
+| `sources ingest <vault> <file>` | 单文件入库（content-hash dedup + 撞名改名）|
+| `sources ingest ... --force-revive` | 同 hash 已 soft-deleted → 复活该 source_id |
 | `sources batch <vault> <dir> [--glob]` | 批量入库 |
 | `sources list <vault> [--status]` | 列源 |
 | `sources show <vault> <source_id>` | 看源元数据 |

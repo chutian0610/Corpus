@@ -42,7 +42,7 @@ from .storage import (
     update_concept,
     write_concept,
 )
-from .vault import ensure_vault, validate_source_path, vault_paths
+from .vault import ensure_vault, pick_raw_target, validate_source_path, vault_paths
 
 
 # ---------- helpers ----------
@@ -213,37 +213,42 @@ def sources() -> None:
 @sources.command(name="ingest")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("source_file", type=click.Path(exists=False, path_type=Path))
+@click.option("--force-revive", is_flag=True,
+              help="同 hash 但已 soft-deleted -> 复活该 source (status=staged), 而非报 ConflictError.")
 @click.option("--json", "as_json", is_flag=True)
-def sources_ingest(vault_path: Path, source_file: Path, as_json: bool) -> None:
-    """单文件入库：content-hash dedup + 撞名改名。
+def sources_ingest(vault_path: Path, source_file: Path, force_revive: bool, as_json: bool) -> None:
+    """单文件入库: content-hash dedup + 撞名改名 + 可选复活.
 
-    源必须放在 <vault>/raw/ 下（Rule 7）。
-    同 hash 已存在 → 抛 ConflictError（exit 1）。
+    源必须放在 <vault>/raw/ 下 (Rule 7).
+    撞名不同内容 -> 自动 <stem>_<ts>_<4hex><ext>.
+    同 hash 已 active (staged/committed) -> 抛 ConflictError (exit 1).
+    同 hash 已 deleted:
+      --force-revive   -> 复用同一 source_id, status=staged, 刷新 raw_path/content_hash.
+      默认 (无 flag)   -> 抛 ConflictError, 提示用 --force-revive.
     """
     paths = _resolve_db(vault_path)
-    # 先校验源在 vault raw/ 内
     try:
         canonical = validate_source_path(vault_path, str(source_file))
     except Exception as e:
         _err(str(e))
 
     content = _read_file(canonical)
-    raw_path = paths["raw"] / canonical.name
+    # 撞名检测: 同名但 sid 不同 -> 自动改名
+    raw_path = pick_raw_target(paths["raw"], content, canonical.name)
 
-    # 如果文件名是 source_id 形式且同 hash 已存在 → 拒收
-    # 否则 stage_source 会通过 content_hash dedup 处理
     try:
         result = stage_source(
             paths["corpus_db"],
             raw_path=raw_path,
             content=content,
             original_filename=canonical.name,
+            revive_on_deleted=force_revive,
         )
-        # 物理写入
         raw_path.write_text(content, encoding="utf-8")
+        action = "revived" if result.get("revived") else "staged"
         _emit(
             {
-                "action": "staged",
+                "action": action,
                 "source_id": result["source_id"],
                 "raw_path": str(raw_path),
                 "size_bytes": result["size_bytes"],
@@ -260,63 +265,69 @@ def sources_ingest(vault_path: Path, source_file: Path, as_json: bool) -> None:
 @click.argument("source_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--glob", "glob_pattern", default="*.md", help="glob 模式（默认 *.md）")
 @click.option("--recursive/--no-recursive", default=True, help="是否递归子目录")
+@click.option("--force-revive", is_flag=True,
+              help="同 hash 但已 deleted -> 复活而非报错.")
 @click.option("--json", "as_json", is_flag=True)
 def sources_batch(
-    vault_path: Path, source_dir: Path, glob_pattern: str, recursive: bool, as_json: bool
+    vault_path: Path, source_dir: Path, glob_pattern: str, recursive: bool,
+    force_revive: bool, as_json: bool,
 ) -> None:
-    """批量入库：glob 匹配 + 逐个 stage。
+    """批量入库: glob 匹配 + 逐个 stage, 撞名自动改名.
 
-    返回每文件的处理结果（success / duplicate / failed）。
+    返回每文件的处理结果 (staged / duplicate / revived / failed).
+    --force-revive: 同 hash 已 deleted -> 复活该 source.
     """
     from .errors import ValidationError
     paths = _resolve_db(vault_path)
 
     matches = list(source_dir.rglob(glob_pattern) if recursive else source_dir.glob(glob_pattern))
     if not matches:
-        _emit({"total": 0, "staged": 0, "duplicates": 0, "failed": 0, "results": []}, as_json=as_json)
+        _emit({"total": 0, "staged": 0, "revived": 0, "duplicates": 0, "failed": 0, "results": []}, as_json=as_json)
         return
 
     results = []
-    n_staged = n_dup = n_fail = 0
+    n_staged = n_dup = n_revived = n_fail = 0
     for src in matches:
         try:
             content = _read_file(src)
             sid = source_id_from_content(content)
-            # 撞名检测：raw/ 下是否已有同名的同 sid？
-            target = paths["raw"] / src.name
-            if target.exists() and source_id_from_content(_read_file(target)) != sid:
-                # 撞名不同内容 → 改名
-                from .ids import rename_suffix
-                stem = src.stem
-                suffix = src.suffix
-                target = paths["raw"] / f"{stem}_{rename_suffix()}{suffix}"
+            # 撞名检测: 同名但 sid 不同 -> 自动改名
+            target = pick_raw_target(paths["raw"], content, src.name)
 
             existing = read_source(paths["corpus_db"], sid)
-            if existing:
+            if existing and existing["status"] != "deleted":
+                # 已 active (staged/committed) -> 跳过
                 results.append({"source": str(src), "action": "duplicate", "existing_id": existing["source_id"]})
                 n_dup += 1
                 continue
+            # deleted -> 让 stage_source 决定 (revive 或报错)
 
             result = stage_source(
                 paths["corpus_db"],
                 raw_path=target,
                 content=content,
                 original_filename=src.name,
+                revive_on_deleted=force_revive,
             )
             target.write_text(content, encoding="utf-8")
-            results.append({"source": str(src), "action": "staged", "source_id": result["source_id"]})
-            n_staged += 1
+            if result.get("revived"):
+                results.append({"source": str(src), "action": "revived", "source_id": result["source_id"]})
+                n_revived += 1
+            else:
+                results.append({"source": str(src), "action": "staged", "source_id": result["source_id"]})
+                n_staged += 1
         except ValidationError as e:
             results.append({"source": str(src), "action": "failed", "rule": e.rule, "message": e.message})
             n_fail += 1
         except CorpusBotError as e:
-            results.append({"source": str(src), "action": "failed", "message": str(e)})
+            results.append({"source": str(src), "action": "failed", "message": str(e), "hint": getattr(e, "hint", None)})
             n_fail += 1
 
     _emit(
         {
             "total": len(matches),
             "staged": n_staged,
+            "revived": n_revived,
             "duplicates": n_dup,
             "failed": n_fail,
             "results": results,

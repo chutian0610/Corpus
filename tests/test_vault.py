@@ -69,3 +69,47 @@ def test_markdown_extension_allowed(vault: Path):
     (vault / "raw" / "x.markdown").write_text("md")
     result = validate_source_path(vault, str(vault / "raw" / "x.markdown"))
     assert result.exists()
+
+
+# ---------- pick_raw_target (撞名改名) ----------
+
+def test_pick_raw_target_no_collision(vault: Path):
+    """raw/ 下无同名 → 直接返回原路径."""
+    from corpus_bot.vault import pick_raw_target
+    target = pick_raw_target(vault / "raw", "any content", "note.md")
+    assert target == vault / "raw" / "note.md"
+
+
+def test_pick_raw_target_same_content_idempotent(vault: Path):
+    """raw/ 下同名但 sid 相同 (同内容) → 返回原路径 (允许覆写)."""
+    from corpus_bot.vault import pick_raw_target
+    content = "# same content\n"
+    (vault / "raw" / "note.md").write_text(content, encoding="utf-8")
+    target = pick_raw_target(vault / "raw", content, "note.md")
+    assert target == vault / "raw" / "note.md"
+
+
+def test_pick_raw_target_different_content_renames(vault: Path):
+    """raw/ 下同名但 sid 不同 → 改名 <stem>_<ts>_<4hex><ext>."""
+    from corpus_bot.vault import pick_raw_target
+    (vault / "raw" / "note.md").write_text("# original\n", encoding="utf-8")
+    target = pick_raw_target(vault / "raw", "# completely new content\n", "note.md")
+    # 不再指向原 note.md
+    assert target != vault / "raw" / "note.md"
+    # 后缀形如 note_<digits>_<4hex>.md
+    name = target.name
+    assert name.startswith("note_")
+    assert name.endswith(".md")
+    parts = name[:-3].split("_")  # 去掉 .md 再按 _ 拆
+    # parts = ["note", ts, 4hex]
+    assert len(parts) == 3
+    assert parts[1].isdigit()
+    assert len(parts[2]) == 4
+
+
+def test_pick_raw_target_preserves_markdown_extension(vault: Path):
+    from corpus_bot.vault import pick_raw_target
+    (vault / "raw" / "deep.markdown").write_text("a\n")
+    target = pick_raw_target(vault / "raw", "completely different\n", "deep.markdown")
+    assert target.suffix == ".markdown"
+    assert target.stem.startswith("deep_")

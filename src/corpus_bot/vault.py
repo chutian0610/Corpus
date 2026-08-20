@@ -132,3 +132,29 @@ def validate_source_path(vault_root: Path, source_path: str) -> Path:
         ) from e
 
     return canonical
+
+
+def pick_raw_target(raw_dir: Path, content: str, hint_name: str) -> Path:
+    """撞名改名：raw/<hint_name> 已被不同内容占用 → <stem>_<ts>_<4hex><suffix>.
+
+    同 sid (同一内容) → 直接返回原路径 (覆写是 idempotent, OK 的).
+    raw_dir 不存在 / 文件不可读 → 直接返回原路径 (让 stage_source 决定).
+    """
+    from .ids import source_id_from_content, rename_suffix
+
+    target = raw_dir / hint_name
+    if not target.exists():
+        return target
+
+    try:
+        existing_bytes = target.read_bytes()
+    except OSError:
+        return target
+
+    if source_id_from_content(existing_bytes) == source_id_from_content(content):
+        return target  # same content, overwrite is fine
+
+    stem = Path(hint_name).stem
+    suffix = Path(hint_name).suffix
+    return raw_dir / f"{stem}_{rename_suffix()}{suffix}"
+

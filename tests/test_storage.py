@@ -409,3 +409,122 @@ def test_update_concept_add_extractions(db: Path):
     assert sid2 in result["added_source_ids"]
     assert sid1 in result["source_ids"]
     assert sid2 in result["source_ids"]
+
+
+# ---------- stage_source revive (同 hash 已 deleted) ----------
+
+def test_stage_source_revives_deleted_when_flag_set(db: Path):
+    """soft_delete 后再 stage 同内容 + revive_on_deleted=True → 复用 sid, status=staged."""
+    from corpus_bot.storage import soft_delete_source
+    raw = Path("/tmp/raw/rev.md")
+    result1 = stage_source(db, raw_path=raw, content="same content", original_filename="rev.md")
+    sid1 = result1["source_id"]
+    soft_delete_source(db, sid1, deleted_reason="test")
+    # 同内容再 stage, 不带 flag → 报错
+    with pytest.raises(ConflictError) as exc:
+        stage_source(db, raw_path=raw, content="same content", original_filename="rev.md")
+    assert "deleted" in str(exc.value).lower()
+    assert exc.value.hint and "force-revive" in exc.value.hint
+    # 带 flag → 复活
+    result2 = stage_source(
+        db, raw_path=raw, content="same content", original_filename="rev.md",
+        revive_on_deleted=True,
+    )
+    assert result2["source_id"] == sid1  # 保留 sid
+    assert result2["status"] == "staged"
+    assert result2["revived"] is True
+    row = read_source(db, sid1)
+    assert row["status"] == "staged"
+    assert row["deleted_at"] is None
+    assert row["deleted_reason"] is None
+
+
+def test_stage_source_deleted_without_flag_raises(db: Path):
+    """deleted 同 hash 不带 revive flag → ConflictError, hint 提示 --force-revive."""
+    from corpus_bot.storage import soft_delete_source
+    result = stage_source(db, raw_path=Path("/tmp/raw/x.md"), content="foo", original_filename="x.md")
+    soft_delete_source(db, result["source_id"], deleted_reason="oops")
+    with pytest.raises(ConflictError) as exc:
+        stage_source(db, raw_path=Path("/tmp/raw/x.md"), content="foo", original_filename="x.md")
+    assert "deleted" in str(exc.value).lower()
+    assert exc.value.hint and "--force-revive" in exc.value.hint
+
+
+def test_stage_source_active_duplicate_still_rejected(db: Path):
+    """active (staged/committed) 同 hash → 仍报 ConflictError (即使 revive_on_deleted=True)."""
+    result = stage_source(db, raw_path=Path("/tmp/raw/d.md"), content="dup", original_filename="d.md")
+    with pytest.raises(ConflictError) as exc:
+        stage_source(
+            db, raw_path=Path("/tmp/raw/d.md"), content="dup", original_filename="d.md",
+            revive_on_deleted=True,  # 即使 flag 为真也不能复活 active 行
+        )
+    assert "duplicate" in str(exc.value).lower()
+
+
+# ---------- init_db migration v1 -> v2 ----------
+
+def test_init_db_upgrades_v1_to_v2(tmp_path: Path):
+    """模拟老库 (v1 DDL 含 UNIQUE(content_hash)) → init_db 应无错升级到 v2."""
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE sources (
+            source_id TEXT PRIMARY KEY,
+            raw_path TEXT NOT NULL,
+            original_filename TEXT,
+            size_bytes INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'staged',
+            created_at TEXT NOT NULL,
+            committed_at TEXT,
+            deleted_at TEXT,
+            deleted_reason TEXT,
+            UNIQUE(content_hash)
+        );
+        INSERT INTO sources VALUES
+            ('abc1234567890123', '/raw/old.md', 'old.md', 5,
+             'abcdef0000000000000000000000000000000000000000000000000000000000',
+             'staged', '2025-01-01T00:00:00+00:00', NULL, NULL, NULL);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # 升级
+    init_db(db_path)
+
+    # 验证: UNIQUE 已移除, content_hash 索引已加, 旧行还在, version=2
+    with sqlite3.connect(str(db_path)) as c:
+        c.row_factory = sqlite3.Row
+        # 没 UNIQUE 了 -> 允许重复 hash 行
+        c.execute(
+            "INSERT INTO sources (source_id, raw_path, original_filename, size_bytes, content_hash, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("abc1234567890124", "/raw/old2.md", "old.md", 5,
+             "abcdef0000000000000000000000000000000000000000000000000000000000",
+             "staged", "2025-01-01T00:00:00+00:00"),
+        )
+        rows = c.execute("SELECT * FROM sources").fetchall()
+        assert len(rows) == 2
+        ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+        assert int(ver["value"]) == 2
+        # 索引存在
+        idx = c.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sources_content_hash'"
+        ).fetchone()
+        assert idx is not None
+
+
+def test_init_db_idempotent_on_v2(tmp_path: Path):
+    """已 v2 的库 init_db 多次也幂等, version 不漂."""
+    db_path = tmp_path / "v2.db"
+    init_db(db_path)
+    init_db(db_path)
+    init_db(db_path)
+    import sqlite3
+    with sqlite3.connect(str(db_path)) as c:
+        ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+        assert int(ver[0]) == 2

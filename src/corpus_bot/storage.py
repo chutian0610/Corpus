@@ -32,7 +32,44 @@ from typing import Any, Iterator
 
 from .errors import ConflictError, StorageError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Migration 步骤表: key=(from_v, to_v), value=函数(conn)
+_MIGRATIONS: dict[tuple[int, int], str] = {
+    (1, 2): "_migrate_1_to_2",
+}
+
+def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
+    """v1 → v2: 去掉 sources.content_hash 的 UNIQUE 约束.
+
+    SQLite 没有 ALTER TABLE DROP CONSTRAINT，标准做法是 rename + recreate.
+    """
+    conn.executescript(
+        """
+        ALTER TABLE sources RENAME TO sources__v1;
+        CREATE TABLE sources (
+            source_id TEXT PRIMARY KEY,
+            raw_path TEXT NOT NULL,
+            original_filename TEXT,
+            size_bytes INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'staged',
+            created_at TEXT NOT NULL,
+            committed_at TEXT,
+            deleted_at TEXT,
+            deleted_reason TEXT
+        );
+        INSERT INTO sources
+            SELECT source_id, raw_path, original_filename, size_bytes,
+                   content_hash, status, created_at, committed_at,
+                   deleted_at, deleted_reason
+            FROM sources__v1;
+        DROP TABLE sources__v1;
+        CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status);
+        CREATE INDEX IF NOT EXISTS idx_sources_content_hash ON sources(content_hash);
+        """
+    )
+
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -45,11 +82,13 @@ CREATE TABLE IF NOT EXISTS sources (
     created_at TEXT NOT NULL,
     committed_at TEXT,
     deleted_at TEXT,
-    deleted_reason TEXT,
-    UNIQUE(content_hash)
+    deleted_reason TEXT
+    -- 注: content_hash 不再 UNIQUE. 软删后允许同 hash 复活.
+    -- dedup 由 stage_source() 自己处理 (按 status 区分).
 );
 
 CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status);
+CREATE INDEX IF NOT EXISTS idx_sources_content_hash ON sources(content_hash);
 
 CREATE TABLE IF NOT EXISTS concepts (
     concept_id TEXT PRIMARY KEY,
@@ -157,14 +196,38 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def init_db(db_path: Path) -> None:
-    """初始化 schema（幂等）。"""
+    """初始化 schema（幂等），并按需跑 migration。"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
         conn.executescript(_SCHEMA_SQL)
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
-            ("schema_version", str(SCHEMA_VERSION)),
-        )
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if row is None:
+            # 旧库: 无 schema_meta, 假设是 v1 (旧 DDL 含 UNIQUE(content_hash)).
+            current = 1
+        else:
+            current = int(row["value"])
+        if current < SCHEMA_VERSION:
+            _run_migrations(conn, current, SCHEMA_VERSION)
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
+                ("schema_version", str(SCHEMA_VERSION)),
+            )
+
+
+def _run_migrations(conn: sqlite3.Connection, from_v: int, to_v: int) -> None:
+    """顺序跑 from_v+1..to_v 的 migration 步骤. 用 getattr 推迟查函数名 (避免 forward ref)."""
+    import sys
+    mod = sys.modules[__name__]
+    for v in range(from_v + 1, to_v + 1):
+        step_name = _MIGRATIONS.get((v - 1, v))
+        if step_name is None:
+            raise StorageError(f"no migration path from v{v-1} to v{v}")
+        step = getattr(mod, step_name, None)
+        if step is None:
+            raise StorageError(f"migration step {step_name} not defined")
+        step(conn)
 
 
 def is_initialized(db_path: Path) -> bool:
@@ -187,10 +250,17 @@ def stage_source(
     raw_path: Path,
     content: str,
     original_filename: str | None = None,
+    revive_on_deleted: bool = False,
 ) -> dict[str, Any]:
-    """落源到 sources 表。如果同 hash 已存在，抛 ConflictError。
+    """落源到 sources 表。dedup by content_hash, status-aware:
 
-    返回：{"source_id", "raw_path", "status", "size_bytes", "content_hash"}
+    - 同 hash 且 status in (staged, committed) → 抛 ConflictError.
+    - 同 hash 且 status='deleted':
+        - revive_on_deleted=False → 抛 ConflictError (提示 --force-revive).
+        - revive_on_deleted=True  → UPDATE 复活 (status='staged', 刷新 raw_path/content_hash).
+    - 不同 hash → 新插入.
+
+    返回: {"source_id", "raw_path", "status", "size_bytes", "content_hash", "revived": bool}
     """
     content_bytes = content.encode("utf-8")
     sid = _hash(content_bytes)[:16]
@@ -199,13 +269,54 @@ def stage_source(
 
     with connect(db_path) as conn:
         existing = conn.execute(
-            "SELECT source_id, raw_path FROM sources WHERE content_hash = ?",
+            "SELECT source_id, raw_path, status FROM sources WHERE content_hash = ?",
             (content_hash,),
         ).fetchone()
         if existing:
+            existing_status = existing["status"]
+            existing_id = existing["source_id"]
+            if existing_status == "deleted":
+                if not revive_on_deleted:
+                    raise ConflictError(
+                        f"duplicate content exists but is deleted: {existing_id}",
+                        hint="use --force-revive to restore this source",
+                    )
+                # 复活: 保留 source_id 不变 (extractions / concepts 引用稳定),
+                # 清掉 deleted_* 字段, 刷新 raw_path / size / content_hash / created_at.
+                conn.execute(
+                    """UPDATE sources SET
+                        status='staged',
+                        raw_path=?,
+                        original_filename=?,
+                        size_bytes=?,
+                        content_hash=?,
+                        created_at=?,
+                        committed_at=NULL,
+                        deleted_at=NULL,
+                        deleted_reason=NULL
+                    WHERE source_id=?""",
+                    (
+                        str(raw_path),
+                        original_filename,
+                        len(content_bytes),
+                        content_hash,
+                        now,
+                        existing_id,
+                    ),
+                )
+                return {
+                    "source_id": existing_id,
+                    "raw_path": str(raw_path),
+                    "status": "staged",
+                    "size_bytes": len(content_bytes),
+                    "content_hash": content_hash,
+                    "created_at": now,
+                    "revived": True,
+                }
+            # active (staged or committed)
             raise ConflictError(
                 f"duplicate content already staged as {existing['raw_path']}",
-                hint=f"existing source_id: {existing['source_id']}",
+                hint=f"existing source_id: {existing_id}, status={existing_status}",
             )
         try:
             conn.execute(
@@ -231,6 +342,7 @@ def stage_source(
         "size_bytes": len(content_bytes),
         "content_hash": content_hash,
         "created_at": now,
+        "revived": False,
     }
 
 
