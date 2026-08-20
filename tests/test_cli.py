@@ -12,7 +12,15 @@ from corpus_bot.errors import ConflictError, ValidationError
 
 
 @pytest.fixture
-def vault(tmp_path: Path) -> Path:
+def external(tmp_path: Path) -> Path:
+    """vault 外的源文件目录 (corpus-bot ingest 必须从 vault 外拉)."""
+    e = tmp_path / "external"
+    e.mkdir(parents=True)
+    return e
+
+
+@pytest.fixture
+def vault(tmp_path: Path, external: Path) -> Path:
     """新建一个空 vault, raw/ 已建好."""
     v = tmp_path / "vault"
     (v / "raw").mkdir(parents=True)
@@ -31,60 +39,57 @@ def _runner():
 
 # ---------- sources ingest 撞名修复 ----------
 
-def test_batch_handles_existing_raw_file_without_clobber(vault: Path):
-    """batch: raw/ 里手工放一个 v1 文件 (模拟外部已存 source) 不会被 batch 覆盖.
-
-    batch 总是为新文件生成 -ingest-<ts> 后缀, 所以 raw/v1.md 保留,
-    新文件变成 raw/note-ingest-<ts>.md.
-    """
+def test_batch_handles_already_ingested_source(vault: Path, external: Path):
+    """batch: 已 ingest 过的 source, 再 batch 同 hash 目录 -> 跳过 (duplicate)."""
     import re
     r = _runner()
 
-    # 步骤 1: 在 raw/ 里手工放一个 v1 文件
-    (vault / "raw" / "note.md").write_text("# version 1 - already in raw\n", encoding="utf-8")
+    # 步骤 1: 外部放 v1
+    (external / "note.md").write_text("# version 1\n", encoding="utf-8")
+    # ingest v1
+    res = r.invoke(cli, [
+        "sources", "ingest", str(vault), str(external / "note.md"), "--json",
+    ])
+    assert res.exit_code == 0
 
-    # 步骤 2: batch 一个目录, 里有 note.md 但内容完全不同
+    # 步骤 2: batch 一个含同 v1 的目录 + 一个新文件 v2
     src_dir = vault / "incoming"
     src_dir.mkdir()
-    (src_dir / "note.md").write_text("# version 2 - completely different\n", encoding="utf-8")
+    (src_dir / "note.md").write_text("# version 1\n", encoding="utf-8")  # 同 v1
+    (src_dir / "other.md").write_text("# version 2\n", encoding="utf-8")  # 新
 
     res = r.invoke(cli, [
         "sources", "batch", str(vault), str(src_dir), "--json",
     ])
     assert res.exit_code == 0, res.stderr
+    assert '"staged": 1' in res.output      # other.md 新入库
+    assert '"duplicates": 1' in res.output   # note.md 同 hash 跳过
 
+    # raw/ 下应该有 2 个文件 (v1 的 ingest-<ts> + v2 的 ingest-<ts>)
     raw_files = sorted(p.name for p in (vault / "raw").iterdir())
-    # 应该有 2 个文件: 原 v1 (note.md) + 改 ingest 后缀的 v2
     assert len(raw_files) == 2
-    assert "note.md" in raw_files  # v1 保留
-    renamed_name = next(f for f in raw_files if f != "note.md")
-    assert renamed_name.startswith("note-ingest-") and renamed_name.endswith(".md"), renamed_name
-    assert re.search(r"ingest-\d{8}-\d{6}", renamed_name)
-
-    # v1 内容未被覆盖
-    assert (vault / "raw" / "note.md").read_text(encoding="utf-8") == "# version 1 - already in raw\n"
-    # v2 内容在改名后的文件里
-    assert (vault / "raw" / renamed_name).read_text(encoding="utf-8") == "# version 2 - completely different\n"
+    for f in raw_files:
+        assert re.search(r"ingest-\d{8}-\d{6}", Path(f).stem)
 
     # batch 输出应含 staged=1, 无 failed
     assert '"staged": 1' in res.output
     assert '"failed": 0' in res.output
 
 
-def test_ingest_collision_same_content_keeps_name(vault: Path):
+def test_ingest_collision_same_content_keeps_name(vault: Path, external: Path):
     """同 hash 撞名 → 不改名 (覆写 idempotent)."""
     r = _runner()
     content = "# same\n"
-    (vault / "raw" / "note.md").write_text(content, encoding="utf-8")
+    (external / "note.md").write_text(content, encoding="utf-8")
     res = r.invoke(cli, [
-        "sources", "ingest", str(vault), str(vault / "raw" / "note.md"), "--json",
+        "sources", "ingest", str(vault), str(external / "note.md"), "--json",
     ])
     assert res.exit_code == 0
     sid1 = res.output.strip().split('"source_id": "')[1].split('"')[0]
 
     # 同内容再 ingest (即使是覆写过的同名)
     res = r.invoke(cli, [
-        "sources", "ingest", str(vault), str(vault / "raw" / "note.md"), "--json",
+        "sources", "ingest", str(vault), str(external / "note.md"), "--json",
     ])
     # 同 hash active → ConflictError → exit 1
     assert res.exit_code == 1
@@ -93,16 +98,16 @@ def test_ingest_collision_same_content_keeps_name(vault: Path):
 
 # ---------- sources ingest --force-revive ----------
 
-def test_ingest_revive_deleted_source(vault: Path):
+def test_ingest_revive_deleted_source(vault: Path, external: Path):
     """soft_delete 后再 ingest 同内容 + --force-revive → 复活, 保留 sid."""
     from corpus_bot.storage import soft_delete_source
 
     r = _runner()
-    (vault / "raw" / "x.md").write_text("same content", encoding="utf-8")
+    (external / "x.md").write_text("same content", encoding="utf-8")
 
     # 第一次入库
     res = r.invoke(cli, [
-        "sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json",
+        "sources", "ingest", str(vault), str(external / "x.md"), "--json",
     ])
     assert res.exit_code == 0
     sid = res.output.strip().split('"source_id": "')[1].split('"')[0]
@@ -112,7 +117,7 @@ def test_ingest_revive_deleted_source(vault: Path):
 
     # 同内容再 ingest, 不带 flag → exit 1 + hint
     res = r.invoke(cli, [
-        "sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json",
+        "sources", "ingest", str(vault), str(external / "x.md"), "--json",
     ])
     assert res.exit_code == 1
     assert "deleted" in res.stderr.lower()
@@ -120,7 +125,7 @@ def test_ingest_revive_deleted_source(vault: Path):
 
     # 带 flag → 复活, 保留 sid
     res = r.invoke(cli, [
-        "sources", "ingest", str(vault), str(vault / "raw" / "x.md"),
+        "sources", "ingest", str(vault), str(external / "x.md"),
         "--force-revive", "--json",
     ])
     assert res.exit_code == 0, res.stderr
@@ -129,17 +134,17 @@ def test_ingest_revive_deleted_source(vault: Path):
     assert revived_sid == sid
 
 
-def test_ingest_revive_then_relist_as_staged(vault: Path):
+def test_ingest_revive_then_relist_as_staged(vault: Path, external: Path):
     """复活后 list 能看到 status=staged."""
     from corpus_bot.storage import soft_delete_source, read_source
 
     r = _runner()
-    (vault / "raw" / "y.md").write_text("y content", encoding="utf-8")
-    res = r.invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "y.md"), "--json"])
+    (external / "y.md").write_text("y content", encoding="utf-8")
+    res = r.invoke(cli, ["sources", "ingest", str(vault), str(external / "y.md"), "--json"])
     sid = res.output.strip().split('"source_id": "')[1].split('"')[0]
     soft_delete_source(vault / ".wiki-meta" / "corpus.db", sid)
     r.invoke(cli, [
-        "sources", "ingest", str(vault), str(vault / "raw" / "y.md"),
+        "sources", "ingest", str(vault), str(external / "y.md"),
         "--force-revive", "--json",
     ])
     row = read_source(vault / ".wiki-meta" / "corpus.db", sid)
@@ -213,14 +218,14 @@ def test_batch_without_revive_flags_deleted_as_failed(vault: Path):
 
 # ---------- concepts list 过滤 ----------
 
-def test_concepts_list_orphans_filter(vault: Path):
+def test_concepts_list_orphans_filter(vault: Path, external: Path):
     """--orphans 只返回 source_ids=[] 的 concept."""
     from corpus_bot.storage import write_concept, init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
 
     # 需要先 ingest 一个 source 给非 orphan concept
-    (vault / "raw" / "x.md").write_text("alpha", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("alpha", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
 
     write_concept(vault / ".wiki-meta" / "corpus.db",
@@ -237,12 +242,12 @@ def test_concepts_list_orphans_filter(vault: Path):
     assert {c["slug"] for c in items} == {"orphan-1"}
 
 
-def test_concepts_list_certified_filters(vault: Path):
+def test_concepts_list_certified_filters(vault: Path, external: Path):
     """--certified / --uncertified 互斥, 默认无过滤."""
     from corpus_bot.storage import write_concept, mark_certified, init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
-    (vault / "raw" / "x.md").write_text("a", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("a", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
     write_concept(vault / ".wiki-meta" / "corpus.db",
         slug="certed", title="C", body="b",
@@ -265,17 +270,17 @@ def test_concepts_list_certified_filters(vault: Path):
 
 # ---------- concepts update CLI ----------
 
-def test_concepts_update_changes_body_and_adds_source(vault: Path):
+def test_concepts_update_changes_body_and_adds_source(vault: Path, external: Path):
     """update: --body 覆盖, --add-extractions 加新 source, --add-links 加新 link."""
     from corpus_bot.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
 
     # 准备两个 source
-    (vault / "raw" / "a.md").write_text("alpha", encoding="utf-8")
-    (vault / "raw" / "b.md").write_text("beta", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "a.md"), "--json"])
+    (external / "a.md").write_text("alpha", encoding="utf-8")
+    (external / "b.md").write_text("beta", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "a.md"), "--json"])
     sid_a = json.loads(res.output)["source_id"]
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "b.md"), "--json"])
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "b.md"), "--json"])
     sid_b = json.loads(res.output)["source_id"]
 
     # write initial concept with sid_a
@@ -310,12 +315,12 @@ def test_concepts_update_changes_body_and_adds_source(vault: Path):
     assert info["body"] == "new body after update"
 
 
-def test_concepts_update_rejects_self_link(vault: Path):
+def test_concepts_update_rejects_self_link(vault: Path, external: Path):
     """update 加 link 含自引用应拒绝."""
     from corpus_bot.storage import init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
-    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
 
     _runner().invoke(cli, [
@@ -334,12 +339,12 @@ def test_concepts_update_rejects_self_link(vault: Path):
 
 # ---------- concepts delete CLI ----------
 
-def test_concepts_delete_dry_run_then_real(vault: Path):
+def test_concepts_delete_dry_run_then_real(vault: Path, external: Path):
     """默认 dry-run 显示信息, --no-dry-run 真删."""
     from corpus_bot.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
-    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
     _runner().invoke(cli, [
         "concepts", "write", str(vault),
@@ -368,12 +373,12 @@ def test_concepts_delete_404_on_unknown(vault: Path):
 
 # ---------- concepts write 物理写失败回滚 ----------
 
-def test_concepts_write_rolls_back_db_on_wiki_write_failure(vault: Path, monkeypatch):
+def test_concepts_write_rolls_back_db_on_wiki_write_failure(vault: Path, external: Path, monkeypatch):
     """wiki 文件写失败时, DB 概念行应被 delete_concept 回滚."""
     from corpus_bot.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
-    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
 
     # 让 wiki_path.write_text 抛 OSError
@@ -403,12 +408,12 @@ def test_concepts_write_rolls_back_db_on_wiki_write_failure(vault: Path, monkeyp
 
 # ---------- concepts remove-extraction CLI (P2) ----------
 
-def test_concepts_remove_extraction_drops_extraction_and_may_orphan(vault: Path):
+def test_concepts_remove_extraction_drops_extraction_and_may_orphan(vault: Path, external: Path):
     """remove-extraction: 撤唯一抽取 → concept is_orphan=1."""
     from corpus_bot.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
-    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
     res = _runner().invoke(cli, [
         "concepts", "write", str(vault),
@@ -441,12 +446,12 @@ def test_concepts_remove_extraction_404(vault: Path):
 
 # ---------- concepts certify partial (P2) ----------
 
-def test_concepts_certify_partial_keeps_old_score(vault: Path):
+def test_concepts_certify_partial_keeps_old_score(vault: Path, external: Path):
     """certify --issues 只改 issues, score 保留."""
     from corpus_bot.storage import init_db, read_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
-    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
     _runner().invoke(cli, [
         "concepts", "write", str(vault),
@@ -471,11 +476,11 @@ def test_concepts_certify_partial_keeps_old_score(vault: Path):
     assert info["certified_issues"] == ["new-issue"]
 
 
-def test_concepts_certify_no_fields_errors(vault: Path):
+def test_concepts_certify_no_fields_errors(vault: Path, external: Path):
     from corpus_bot.storage import init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
-    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
     _runner().invoke(cli, [
         "concepts", "write", str(vault),
@@ -490,12 +495,12 @@ def test_concepts_certify_no_fields_errors(vault: Path):
     assert "no fields" in (res.stderr or "").lower()
 
 
-def test_concepts_certify_first_time_requires_score(vault: Path):
+def test_concepts_certify_first_time_requires_score(vault: Path, external: Path):
     """首次认证必须 --score."""
     from corpus_bot.storage import init_db
     init_db(vault / ".wiki-meta" / "corpus.db")
-    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
     _runner().invoke(cli, [
         "concepts", "write", str(vault),
@@ -511,12 +516,12 @@ def test_concepts_certify_first_time_requires_score(vault: Path):
 
 # ---------- find_concept_by_link scoring (P2) ----------
 
-def test_find_by_link_returns_match_score_sorted(vault: Path):
+def test_find_by_link_returns_match_score_sorted(vault: Path, external: Path):
     """find-by-link 返回按 match_score DESC 排序, 含 score 字段."""
     from corpus_bot.storage import init_db, write_concept
     init_db(vault / ".wiki-meta" / "corpus.db")
-    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
-    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
     sid = json.loads(res.output)["source_id"]
     db = vault / ".wiki-meta" / "corpus.db"
     write_concept(db, slug="postgres", title="Postgres Overview", body="b",
@@ -560,3 +565,46 @@ def test_vault_init_idempotent_on_existing(vault: Path):
     assert res.exit_code == 0, res.stderr
     # raw/ 还在
     assert (vault / "raw").is_dir()
+
+
+# ---------- sources ingest in-vault 检查 ----------
+
+def test_ingest_rejects_path_inside_raw(vault: Path, external: Path):
+    """ingest vault/raw/ 内文件 → 报 'already in vault raw/'."""
+    # 先正常 ingest 一个文件到 raw/
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    assert res.exit_code == 0
+    # raw/ 里有 x-ingest-<ts>.md, 拿真实路径再 ingest
+    raw_files = list((vault / "raw").iterdir())
+    assert len(raw_files) == 1
+    target = raw_files[0]
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(target), "--json"])
+    assert res.exit_code == 1
+    assert "path is inside vault raw/" in (res.stderr or "")
+    assert "不重复 ingest" in (res.stderr or "")
+
+
+def test_ingest_rejects_path_inside_vault_other_dir(vault: Path, external: Path):
+    """ingest vault 内部目录 (wiki/) → 报 'forbidden internal directory'."""
+    # 手工在 wiki/ 里放文件
+    (vault / "wiki" / "concept").mkdir(parents=True, exist_ok=True)
+    wiki_file = vault / "wiki" / "concept" / "leak.md"
+    wiki_file.write_text("leaked", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(wiki_file), "--json"])
+    assert res.exit_code == 1
+    assert "path is inside vault" in (res.stderr or "")
+    assert "forbidden internal" in (res.stderr or "").lower() or "禁止" in (res.stderr or "")
+
+
+def test_ingest_accepts_external_absolute_path(vault: Path, tmp_path: Path):
+    """ingest 接受 vault 外的绝对路径 (不同 cwd 也行)."""
+    src = tmp_path / "outside.md"
+    src.write_text("absolute outside content", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(src), "--json"])
+    assert res.exit_code == 0, res.stderr
+    parsed = json.loads(res.output)
+    assert parsed["action"] == "staged"
+    # raw_path 应在 vault/raw/
+    assert str(vault / "raw") in parsed["raw_path"]
+    assert parsed["raw_path"].endswith(".md")

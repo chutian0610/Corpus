@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .errors import ConfigError, ValidationError
+from .errors import ConfigError, StorageError, ValidationError
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MiB
 ALLOWED_EXTENSIONS = frozenset({".md", ".markdown", ""})  # 无后缀也允许
@@ -75,43 +75,87 @@ def ensure_vault(vault_root: Path) -> dict[str, Path]:
     return paths
 
 
-def validate_source_path(vault_root: Path, source_path: str) -> Path:
-    """七条校验。失败抛 ValidationError(rule, path, message)。"""
-    # Rule 1: 存在
+def validate_source_path_basic(source_path: Path, vault_root: Path) -> Path:
+    """Rule 1-5 基础校验 (不限制 path 位置).
+
+    适用场景: 'sources ingest' 接受 vault 外的文件, 只需要基础校验.
+    返回 canonical (resolve strict=True) 的 Path.
+
+    Rule 1: 存在
+    Rule 2: 非 symlink
+    Rule 3: 常规文件
+    Rule 4: 扩展名 (.md / .markdown / 无后缀)
+    Rule 5: ≤50 MiB
+    """
     if not source_path:
-        raise ValidationError("R1_missing", source_path, "empty path")
+        raise ValidationError("R1_missing", str(source_path), "empty path")
+    if not source_path.exists():
+        raise ValidationError("R1_exists", str(source_path), "file does not exist")
+    if source_path.is_symlink():
+        raise ValidationError("R2_symlink", str(source_path), "symlink not allowed")
+    if not source_path.is_file():
+        raise ValidationError("R3_regular", str(source_path), "not a regular file")
 
-    src = Path(source_path)
-    if not src.exists():
-        raise ValidationError("R1_exists", source_path, "file does not exist")
-
-    # Rule 2: 非 symlink
-    if src.is_symlink():
-        raise ValidationError("R2_symlink", source_path, "symlink not allowed")
-
-    # Rule 3: 常规文件
-    if not src.is_file():
-        raise ValidationError("R3_regular", source_path, "not a regular file")
-
-    # Rule 4: 扩展名
-    ext = src.suffix
+    ext = source_path.suffix
     if ext.lower() not in ALLOWED_EXTENSIONS:
         raise ValidationError(
-            "R4_extension", source_path, f"extension {ext!r} not allowed (use .md/.markdown)"
+            "R4_extension", str(source_path),
+            f"extension {ext!r} not allowed (use .md/.markdown)",
         )
 
-    # Rule 5: 大小
-    size = src.stat().st_size
+    size = source_path.stat().st_size
     if size > MAX_FILE_SIZE:
         raise ValidationError(
-            "R5_size", source_path, f"file too large ({size} bytes, max {MAX_FILE_SIZE})"
+            "R5_size", str(source_path),
+            f"file too large ({size} bytes, max {MAX_FILE_SIZE})",
         )
 
-    # Rule 6: canonicalize 后在 vault 内
     try:
-        canonical = src.resolve(strict=True)
+        return source_path.resolve(strict=True)
     except OSError as e:
-        raise ValidationError("R6_canonical", source_path, f"canonicalize failed: {e}") from e
+        raise ValidationError("R6_canonical", str(source_path), f"canonicalize failed: {e}") from e
+
+
+def assert_source_outside_vault(canonical: Path, vault_root: Path, raw_dir: Path) -> None:
+    """检查 canonical 不在 vault 内 (避免重复 ingest vault 内已有文件).
+
+    - 在 raw/ 内 → 报 'already in vault raw/'
+    - 在 vault 内但非 raw/ (wiki/, .wiki-meta/) → 报 'forbidden internal vault dir'
+    - 在 vault 外 → 通过
+    """
+    vault_real = vault_root.resolve()
+    try:
+        canonical.relative_to(vault_real)
+    except ValueError:
+        return  # 在 vault 外, OK
+
+    # 在 vault 内, 区分 raw/ vs 其它内部目录
+    try:
+        canonical.relative_to(raw_dir.resolve())
+        raise StorageError(
+            f"path is inside vault raw/: {canonical}",
+            hint="raw/ 是 ingest 产物目录, 不重复 ingest. "
+                 "如要重新入库同一文件, 先 sources delete <sid>.",
+        )
+    except ValueError:
+        pass  # 不在 raw/, 是 vault 内部目录
+
+    raise StorageError(
+        f"path is inside vault (forbidden internal directory): {canonical}",
+        hint="ingest 只接受 vault 外的文件. "
+             "vault 内部目录 (wiki/, .wiki-meta/) 禁止 ingest.",
+    )
+
+
+def validate_source_path(vault_root: Path, source_path: str) -> Path:
+    """七条校验 (Rule 1-5 + Rule 6 在 vault 内 + Rule 7 在 raw/ 子树).
+
+    适用场景: 未来需要严格 in-vault 检查的命令 (e.g. 'sources re-stage').
+    当前 sources ingest 用 validate_source_path_basic + assert_source_outside_vault
+    (因为 ingest 是 '从 vault 外拉进来' 的语义).
+    """
+    src = Path(source_path)
+    canonical = validate_source_path_basic(src, vault_root)
 
     vault_real = vault_root.resolve()
     try:
@@ -121,7 +165,6 @@ def validate_source_path(vault_root: Path, source_path: str) -> Path:
             "R6_canonical", source_path, "path is outside vault root"
         ) from e
 
-    # Rule 7: 在 raw/ 子树下
     raw_root = vault_root / RAW_DIR
     raw_real = raw_root.resolve()
     try:

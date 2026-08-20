@@ -107,6 +107,7 @@ uv tool install -e .    # 推荐 (隔离)
   - content-hash dedup：同 hash 已 active (staged/committed) → `ConflictError` (exit 1)
   - 同 hash 已 soft-deleted → 默认 `ConflictError` 提示 `--force-revive`；加 flag → 复用原 `source_id`，status='staged'，刷新 `raw_path`/`content_hash`
   - 文件名生成（`pick_raw_target` in `vault.py`）：**所有 ingest 都加** `-ingest-<UTC compact ISO>` 后缀（例 `postgresql-mvcc-ingest-20260820-183000.md`），不再依赖撞名检测；同内容二次入库由 content_hash dedup 在 stage_source 拦下
+- `sources ingest` 接受 **vault 外**路径（自动 cp 到 `raw/<stem>-ingest-<UTC><ext>`），不再要求源已在 `raw/` 内。vault 内文件（含 `raw/` 子树 + `wiki/` / `.wiki-meta/`）会被 `assert_source_outside_vault` 拒绝，hint 提示：raw/ 是 ingest 产物目录（防重复 ingest）/ vault 内部目录禁止 ingest。`vault.py:validate_source_path` 旧七条规则保留给未来 in-vault 严格校验场景
 - `sources delete <sid>`（软删）：`status='deleted'`，自动从引用它的 concept.source_ids 移除；**不级联删 concept**
 - 如果删后 concept.source_ids 变空 → 自动 `is_orphan=1`
 - `concepts write --extractions '[...]'`：**强制每个 source 一段 quote_span 原文证据**

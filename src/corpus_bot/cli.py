@@ -45,7 +45,14 @@ from .storage import (
     update_concept,
     write_concept,
 )
-from .vault import ensure_vault, pick_raw_target, validate_source_path, vault_paths
+from .vault import (
+    assert_source_outside_vault,
+    ensure_vault,
+    pick_raw_target,
+    validate_source_path,
+    validate_source_path_basic,
+    vault_paths,
+)
 
 
 # ---------- helpers ----------
@@ -224,23 +231,38 @@ def sources() -> None:
               help="同 hash 但已 soft-deleted -> 复活该 source (status=staged), 而非报 ConflictError.")
 @click.option("--json", "as_json", is_flag=True)
 def sources_ingest(vault_path: Path, source_file: Path, force_revive: bool, as_json: bool) -> None:
-    """单文件入库: content-hash dedup + 撞名改名 + 可选复活.
+    """单文件入库: content-hash dedup + 可选复活.
 
-    源必须放在 <vault>/raw/ 下 (Rule 7).
-    撞名不同内容 -> 自动 <stem>_<ts>_<4hex><ext>.
-    同 hash 已 active (staged/committed) -> 抛 ConflictError (exit 1).
-    同 hash 已 deleted:
-      --force-revive   -> 复用同一 source_id, status=staged, 刷新 raw_path/content_hash.
-      默认 (无 flag)   -> 抛 ConflictError, 提示用 --force-revive.
+    源文件必须放在 **vault 外** (vault 内任何位置都报错):
+      - 在 vault 外 -> 自动 cp 到 <vault>/raw/<stem>-ingest-<UTC><ext> + stage
+      - 在 vault/raw/ 内 -> 报 'already in vault raw/' (避免重复 ingest)
+      - 在 vault 其它目录 (wiki/ .wiki-meta/) -> 报 'forbidden internal directory'
+
+    ingest 的语义是 '把 vault 外的内容拉进来', 不是 '重新入库 vault 里的文件'.
+    如要重新入库同一文件: 先 sources delete <sid> 软删, 再 ingest (默认会因 content_hash 撞;
+    软删后再 ingest 需 --force-revive).
+
+    同 hash dedup:
+      active (staged/committed) -> ConflictError
+      deleted + --force-revive -> 复用 source_id, status='staged', 刷新 raw_path/content_hash
+      deleted 不带 flag -> ConflictError, hint 提示 --force-revive
     """
     paths = _resolve_db(vault_path)
+
+    # Rule 1-5 基础校验 (symlink / 扩展名 / 大小 / 存在性)
     try:
-        canonical = validate_source_path(vault_path, str(source_file))
+        canonical = validate_source_path_basic(source_file, paths["root"])
     except Exception as e:
         _err(str(e))
 
+    # 新增: 不允许 ingest vault 内的任何文件
+    try:
+        assert_source_outside_vault(canonical, paths["root"], paths["raw"])
+    except Exception as e:
+        _err(str(e), hint=getattr(e, "hint", None))
+
     content = _read_file(canonical)
-    # 撞名检测: 同名但 sid 不同 -> 自动改名
+    # 撞名检测: 同名但 sid 不同 -> 自动改名 <stem>-ingest-<UTC><ext>
     raw_path = pick_raw_target(paths["raw"], content, canonical.name)
 
     try:

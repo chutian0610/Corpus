@@ -179,6 +179,7 @@ error: <message>
 - `extraction not found` → `concepts remove-extraction` 的 id 不存在
 - `no fields to update` → `concepts certify` 至少传一个 `--score / --issues / --suggestions`
 - `score is required for first-time certification` → 首次认证必传 `--score` (后续 partial update 可省)
+- `path is inside vault raw/` → `sources ingest` 不接受 vault 内文件. raw/ 是 ingest 产物目录, 想重新入库同一文件先 `sources delete <sid>`
 - `score must be in [0, 1]` → 0-1 之间的数
 
 sources.batch 的每个 result 也带 `hint` 字段 (deleted 行未带 `--force-revive` 时填)。
@@ -241,7 +242,8 @@ corpus-bot sources delete <vault> <sid> --yes --reason version-update
 | `vault init <path>` | 创建 vault 目录 + 初始化 SQLite |
 | `vault info <path>` | vault 路径表 + 元信息 |
 | `vault stats <path>` / `stats <path>` | source/concept 统计 + 认证覆盖率 |
-| `sources ingest <vault> <file>` | 单文件入库（content-hash dedup + `-ingest-<ts>` 后缀）|
+| `sources ingest <vault> <file>` | 单文件入库 (vault **外**文件, content-hash dedup + `-ingest-<ts>` 后缀) |
+| (上一行的反例) | `sources ingest <vault> <vault>/raw/X.md` → 报 `path is inside vault raw/` (不重复 ingest) |
 | `sources ingest ... --force-revive` | 同 hash 已 soft-deleted → 复活该 source_id |
 | `concepts write <vault> ...` | 写 concept (必传 --extractions, 每个 source 一段 quote_span) |
 | `concepts update <vault> <slug> --body ... --add-extractions ...` | 增量更新 (改 title/body + 加 extraction/link) |
