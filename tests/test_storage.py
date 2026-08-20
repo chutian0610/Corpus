@@ -667,3 +667,169 @@ def test_write_concept_validates_links(db: Path, staged_source: str):
             links=["x"],  # self-ref
         )
     assert "self-reference" in str(exc.value).lower()
+
+
+# ---------- remove_extraction (P2) ----------
+
+def test_remove_extraction_drops_row_and_syncs_source_ids(db: Path, staged_source: str):
+    """删唯一 extraction → concept.source_ids 也移除该 sid, is_orphan=1."""
+    from corpus_bot.storage import remove_extraction, write_concept, read_concept
+    res = write_concept(
+        db, slug="r1", title="R1", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
+    )
+    ext_id = res["extraction_ids"][0]
+    out = remove_extraction(db, ext_id)
+    assert out["deleted"] is True
+    assert out["concept_slug"] == "r1"
+    assert out["source_id"] == staged_source
+    assert out["concept_source_ids_after"] == []
+    assert out["concept_is_orphan_after"] is True
+    info = read_concept(db, "r1")
+    assert info["is_orphan"] is True
+    assert info["source_ids"] == []
+
+
+def test_remove_extraction_keeps_source_id_when_others_exist(db: Path, staged_source: str):
+    """同 (concept, source) 多次抽取, 删一条 → source_id 仍在 (还有别的 extractions 引用)."""
+    from corpus_bot.storage import remove_extraction, update_concept, write_concept, read_concept
+    res = write_concept(
+        db, slug="r2", title="R2", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q1"}], links=[],
+    )
+    ext_id_1 = res["extraction_ids"][0]
+    # 加第二次抽取 (同 sid, 不同 quote)
+    update_concept(db, slug="r2",
+        add_extractions=[{"source_id": staged_source, "quote_span": "q2"}])
+    out = remove_extraction(db, ext_id_1)
+    assert out["deleted"] is True
+    assert staged_source in out["concept_source_ids_after"]  # 还有 q2 引用
+    info = read_concept(db, "r2")
+    assert info["is_orphan"] is False
+
+
+def test_remove_extraction_404(db: Path):
+    from corpus_bot.storage import remove_extraction
+    with pytest.raises(StorageError) as exc:
+        remove_extraction(db, "nonexistent")
+    assert "extraction not found" in str(exc.value)
+
+
+# ---------- mark_certified partial update (P2) ----------
+
+def test_mark_certified_first_time_requires_score(db: Path, staged_source: str):
+    from corpus_bot.storage import write_concept, mark_certified
+    write_concept(
+        db, slug="p", title="P", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
+    )
+    # 首次认证不传 score → 应报
+    with pytest.raises(StorageError) as exc:
+        mark_certified(db, slug="p", issues=["x"])
+    assert "first-time" in str(exc.value).lower()
+
+
+def test_mark_certified_no_fields_raises(db: Path, staged_source: str):
+    from corpus_bot.storage import write_concept, mark_certified
+    write_concept(
+        db, slug="p2", title="P2", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
+    )
+    mark_certified(db, slug="p2", score=0.5, issues=["a"], suggestions=["b"])  # 首次
+    # 全 None → 报
+    with pytest.raises(StorageError) as exc:
+        mark_certified(db, slug="p2")
+    assert "no fields" in str(exc.value).lower()
+
+
+def test_mark_certified_partial_keeps_old_fields(db: Path, staged_source: str):
+    """只传 --issues, 旧 score 和 suggestions 应保留."""
+    from corpus_bot.storage import write_concept, mark_certified, read_concept
+    write_concept(
+        db, slug="p3", title="P3", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
+    )
+    mark_certified(db, slug="p3", score=0.7, issues=["a"], suggestions=["b"])
+    # 部分更新: 只改 issues
+    res = mark_certified(db, slug="p3", issues=["new-issue"])
+    assert res["score"] == 0.7  # 保留
+    assert res["issues"] == ["new-issue"]  # 改
+    assert res["suggestions"] == ["b"]  # 保留
+    assert res["partial_update"] is True
+    info = read_concept(db, "p3")
+    assert info["certified_score"] == 0.7
+    assert info["certified_issues"] == ["new-issue"]
+    assert info["certified_suggestions"] == ["b"]
+
+
+def test_mark_certified_partial_score_only(db: Path, staged_source: str):
+    from corpus_bot.storage import write_concept, mark_certified
+    write_concept(
+        db, slug="p4", title="P4", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}], links=[],
+    )
+    mark_certified(db, slug="p4", score=0.5, issues=["i"], suggestions=["s"])
+    res = mark_certified(db, slug="p4", score=0.9)
+    assert res["score"] == 0.9
+    assert res["issues"] == ["i"]
+    assert res["suggestions"] == ["s"]
+
+
+# ---------- find_concept_by_link scoring (P2) ----------
+
+def test_find_concept_by_link_match_score_exact(db: Path, staged_source: str):
+    from corpus_bot.storage import write_concept, find_concept_by_link
+    write_concept(
+        db, slug="postgresql-mvcc", title="PostgreSQL MVCC", body="",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    out = find_concept_by_link(db, "PostgreSQL MVCC")
+    assert len(out) == 1
+    assert out[0]["match_score"] == 1.0
+    assert out[0]["slug"] == "postgresql-mvcc"
+
+
+def test_find_concept_by_link_match_score_prefix_contains_title(db: Path, staged_source: str):
+    from corpus_bot.storage import write_concept, find_concept_by_link
+    # slug 短, 是其他 slug 的前缀
+    write_concept(
+        db, slug="postgres", title="Postgres Overview", body="",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    write_concept(
+        db, slug="postgres-mvcc", title="MVCC", body="",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    write_concept(
+        db, slug="oracle-postgres", title="Oracle to PG Migration", body="",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    out = find_concept_by_link(db, "postgres")
+    slugs = [c["slug"] for c in out]
+    # exact "postgres" 排第一, 然后 startswith "postgres-mvcc", 然后 contains "oracle-postgres"
+    assert slugs[0] == "postgres"
+    assert slugs == sorted(slugs, key=lambda s: (-dict(zip(slugs, [c["match_score"] for c in out]))[s], len(s)))
+
+
+def test_find_concept_by_link_title_only_match(db: Path, staged_source: str):
+    from corpus_bot.storage import write_concept, find_concept_by_link
+    write_concept(
+        db, slug="mvcc-deep-dive", title="Deep dive into PostgreSQL WAL", body="",
+        extractions_data=[_make_staged() if False else _make_extraction(staged_source)], links=[],
+    )
+    out = find_concept_by_link(db, "WAL")
+    # slug 不含 "wal", 但 title 含 (case-insensitive)
+    assert len(out) == 1
+    assert out[0]["slug"] == "mvcc-deep-dive"
+    assert out[0]["match_score"] == 0.4
+
+
+def test_find_concept_by_link_unrelated_filtered(db: Path, staged_source: str):
+    from corpus_bot.storage import write_concept, find_concept_by_link
+    write_concept(
+        db, slug="kafka", title="Apache Kafka", body="",
+        extractions_data=[_make_extraction(staged_source)], links=[],
+    )
+    # 搜 "postgres" 完全不相关 → 返回 []
+    out = find_concept_by_link(db, "postgres")
+    assert out == []

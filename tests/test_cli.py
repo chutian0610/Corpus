@@ -399,3 +399,142 @@ def test_concepts_write_rolls_back_db_on_wiki_write_failure(vault: Path, monkeyp
 
     # DB 行已回滚 (concept 应不存在)
     assert read_concept(vault / ".wiki-meta" / "corpus.db", "rollback-me") is None
+
+
+# ---------- concepts remove-extraction CLI (P2) ----------
+
+def test_concepts_remove_extraction_drops_extraction_and_may_orphan(vault: Path):
+    """remove-extraction: 撤唯一抽取 → concept is_orphan=1."""
+    from corpus_bot.storage import init_db, read_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "rem", "--title", "R", "--body", "b",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "x"}]),
+        "--json",
+    ])
+    # 直接查 DB 拿 extraction_id
+    import sqlite3
+    with sqlite3.connect(str(vault / ".wiki-meta" / "corpus.db")) as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute("SELECT extraction_id FROM extractions WHERE concept_slug=?", ("rem",)).fetchone()
+        ext_id = row["extraction_id"]
+
+    res = _runner().invoke(cli, ["concepts", "remove-extraction", str(vault), ext_id, "--json"])
+    assert res.exit_code == 0, res.stderr
+    parsed = json.loads(res.output)
+    assert parsed["deleted"] is True
+    assert parsed["concept_is_orphan_after"] is True
+
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "rem")
+    assert info["is_orphan"] is True
+
+
+def test_concepts_remove_extraction_404(vault: Path):
+    res = _runner().invoke(cli, ["concepts", "remove-extraction", str(vault), "e_does_not_exist"])
+    assert res.exit_code == 1
+    assert "extraction not found" in (res.stderr or "")
+
+
+# ---------- concepts certify partial (P2) ----------
+
+def test_concepts_certify_partial_keeps_old_score(vault: Path):
+    """certify --issues 只改 issues, score 保留."""
+    from corpus_bot.storage import init_db, read_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+    _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "c", "--title", "C", "--body", "b",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "x"}]),
+        "--json",
+    ])
+    _runner().invoke(cli, ["concepts", "certify", str(vault), "c",
+        "--score", "0.7", "--issues", "a", "--suggestions", "b", "--json"])
+
+    res = _runner().invoke(cli, ["concepts", "certify", str(vault), "c",
+        "--issues", "new-issue", "--json"])
+    assert res.exit_code == 0, res.stderr
+    parsed = json.loads(res.output)
+    assert parsed["score"] == 0.7
+    assert parsed["issues"] == ["new-issue"]
+    assert parsed["suggestions"] == ["b"]
+    assert parsed["partial_update"] is True
+
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "c")
+    assert info["certified_score"] == 0.7
+    assert info["certified_issues"] == ["new-issue"]
+
+
+def test_concepts_certify_no_fields_errors(vault: Path):
+    from corpus_bot.storage import init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+    _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "c2", "--title", "C2", "--body", "b",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "x"}]),
+        "--json",
+    ])
+    _runner().invoke(cli, ["concepts", "certify", str(vault), "c2",
+        "--score", "0.5", "--issues", "x", "--json"])
+    res = _runner().invoke(cli, ["concepts", "certify", str(vault), "c2", "--json"])
+    assert res.exit_code == 1
+    assert "no fields" in (res.stderr or "").lower()
+
+
+def test_concepts_certify_first_time_requires_score(vault: Path):
+    """首次认证必须 --score."""
+    from corpus_bot.storage import init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+    _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "c3", "--title", "C3", "--body", "b",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "x"}]),
+        "--json",
+    ])
+    res = _runner().invoke(cli, ["concepts", "certify", str(vault), "c3",
+        "--issues", "only-issues", "--json"])
+    assert res.exit_code == 1
+    assert "first-time" in (res.stderr or "").lower() or "score is required" in (res.stderr or "").lower()
+
+
+# ---------- find_concept_by_link scoring (P2) ----------
+
+def test_find_by_link_returns_match_score_sorted(vault: Path):
+    """find-by-link 返回按 match_score DESC 排序, 含 score 字段."""
+    from corpus_bot.storage import init_db, write_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (vault / "raw" / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(vault / "raw" / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+    db = vault / ".wiki-meta" / "corpus.db"
+    write_concept(db, slug="postgres", title="Postgres Overview", body="b",
+        extractions_data=[{"source_id": sid, "quote_span": "x"}], links=[])
+    write_concept(db, slug="postgres-mvcc", title="MVCC", body="b",
+        extractions_data=[{"source_id": sid, "quote_span": "x"}], links=[])
+    write_concept(db, slug="wal-deep", title="Deep dive into PostgreSQL WAL", body="b",
+        extractions_data=[{"source_id": sid, "quote_span": "x"}], links=[])
+
+    # 搜 "postgres" → 第一个是 exact, 然后 startswith, contains, title
+    res = _runner().invoke(cli, ["concepts", "find-by-link", str(vault), "postgres", "--json"])
+    items = json.loads(res.output)
+    slugs = [c["slug"] for c in items]
+    assert "postgres" in slugs
+    assert "postgres-mvcc" in slugs
+    # score 都在
+    for it in items:
+        assert "match_score" in it
+    # 第一个 score 最高
+    scores = [c["match_score"] for c in items]
+    assert scores == sorted(scores, reverse=True)

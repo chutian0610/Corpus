@@ -157,6 +157,9 @@ error: <message>
 - `concept slug already exists` → 用 `concepts update` 而非 `write`
 - `link cannot be self-reference` → concept 不能 wikilink 自己
 - `link not slug-safe` → links 必须是合法 slug (小写字母数字+连字符)
+- `extraction not found` → `concepts remove-extraction` 的 id 不存在
+- `no fields to update` → `concepts certify` 至少传一个 `--score / --issues / --suggestions`
+- `score is required for first-time certification` → 首次认证必传 `--score` (后续 partial update 可省)
 - `score must be in [0, 1]` → 0-1 之间的数
 
 sources.batch 的每个 result 也带 `hint` 字段 (deleted 行未带 `--force-revive` 时填)。
@@ -225,6 +228,9 @@ corpus-bot sources delete <vault> <sid> --yes --reason version-update
 | `concepts update <vault> <slug> --body ... --add-extractions ...` | 增量更新 (改 title/body + 加 extraction/link) |
 | `concepts delete <vault> <slug>` | 删 concept (默认 dry-run, --no-dry-run 真删, 同步清 wiki 文件) |
 | `concepts list ... --orphans` / `--certified` / `--uncertified` | 过滤 (--certified 与 --uncertified 互斥) |
+| `concepts remove-extraction <vault> <extraction_id>` | 细粒度撤一次抽取 (自动 sync concept.source_ids / is_orphan) |
+| `concepts find-by-link ...` | 返回含 `match_score` 字段 (1.0 exact / 0.9 startswith / 0.5 contains / 0.4 title), 按 score DESC 排 |
+| `concepts certify ... --score X --issues "..."` | 首次认证必传 `--score`; 后续 partial 可省, 传 "" 清空 list |
 | `sources batch <vault> <dir> [--glob]` | 批量入库 |
 | `sources list <vault> [--status]` | 列源 |
 | `sources show <vault> <source_id>` | 看源元数据 |

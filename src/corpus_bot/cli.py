@@ -24,6 +24,7 @@ from .storage import (
     commit_source,
     delete_concept,
     dry_run_delete_source,
+    remove_extraction,
     export_index,
     find_concept_by_link,
     get_concept_evidence,
@@ -685,18 +686,32 @@ def concepts_uncertified(vault_path: Path, limit: int, as_json: bool) -> None:
 @concepts.command(name="certify")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("slug")
-@click.option("--score", type=float, required=True, help="0.0-1.0")
-@click.option("--issues", default="", help="逗号分隔的问题列表")
-@click.option("--suggestions", default="", help="逗号分隔的改进建议")
+@click.option("--score", type=float, default=None, help="0.0-1.0; 省略则保留旧值")
+@click.option("--issues", default=None, help="逗号分隔; 省略=保留; 传 \"\"=清空")
+@click.option("--suggestions", default=None, help="同上")
 @click.option("--by", "certified_by", default="agent")
 @click.option("--json", "as_json", is_flag=True)
 def concepts_certify(
-    vault_path: Path, slug: str, score: float, issues: str, suggestions: str,
+    vault_path: Path, slug: str, score: float | None,
+    issues: str | None, suggestions: str | None,
     certified_by: str, as_json: bool,
 ) -> None:
+    """标记/部分更新认证. score/issues/suggestions 都可选.
+
+    - 全省略: 报错 (no-op)
+    - 部分省略: 保留旧值
+    - 全传: 全量覆盖 (传 \"\" 表示清空 list)
+
+    首次认证必须传 --score.
+    """
     paths = _resolve_db(vault_path)
-    issue_list = [s.strip() for s in issues.split(",") if s.strip()]
-    sugg_list = [s.strip() for s in suggestions.split(",") if s.strip()]
+    issue_list: list[str] | None = None
+    if issues is not None:
+        issue_list = [s.strip() for s in issues.split(",")]
+        # 保留显式传空 (清空 list) 的语义: 不 strip 后再过滤
+    sugg_list: list[str] | None = None
+    if suggestions is not None:
+        sugg_list = [s.strip() for s in suggestions.split(",")]
     try:
         result = mark_certified(
             paths["corpus_db"],
@@ -704,7 +719,7 @@ def concepts_certify(
             suggestions=sugg_list, certified_by=certified_by,
         )
     except Exception as e:
-        _err(str(e))
+        _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
 
 
@@ -755,6 +770,28 @@ def concepts_add_source(vault_path: Path, slug: str, source_id: str, quote_span:
             paths["corpus_db"], slug, source_id,
             quote_span=quote_span, prompt_version=prompt_version,
         )
+        export_index(paths["corpus_db"], paths["wiki_index"])
+    except Exception as e:
+        _err(str(e), hint=getattr(e, "hint", None))
+    _emit(result, as_json=as_json)
+
+
+@concepts.command(name="remove-extraction")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.argument("extraction_id")
+@click.option("--json", "as_json", is_flag=True)
+def concepts_remove_extraction(vault_path: Path, extraction_id: str, as_json: bool) -> None:
+    """细粒度撤一次抽取 (deletes extractions 行 + sync concept.source_ids).
+
+    与 `concepts remove-source` 粗粒度 (撤掉整个 source) 互补:
+    同 (concept, source) 多次抽取时, 这个只撤其中一次.
+
+    sync 语义: 删的是该 sid 的最后一条 extraction → 从 concept.source_ids 移除,
+    并按需 is_orphan=1.
+    """
+    paths = _resolve_db(vault_path)
+    try:
+        result = remove_extraction(paths["corpus_db"], extraction_id)
         export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))

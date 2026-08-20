@@ -97,6 +97,10 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 - `concepts delete` (默认 dry-run, --no-dry-run 真删): hard delete concept + extractions + links + wiki/concept/<slug>.md，不动 source 表
 - `concepts list --orphans / --certified / --uncertified`: 三个 flag 互斥 (certified + uncertified 不能同传)
 - `links` 校验：`write_concept` / `update_concept` 都拒绝自引用 + 非 slug-safe 字符串 (用 `slugify()` 反向检查)
+- `remove_extraction(extraction_id)`: 细粒度撤一次抽取 — 删 extractions 行 + sync concept.source_ids (该 sid 无其它抽取时移除), 按需 `is_orphan=1`. 与 `remove_source_from_concept` (粗粒度) 互为补充
+- `mark_certified` partial update: `score / issues / suggestions` 都可选. `None` = 保留旧值; 传 list (含 `[]`) = 覆盖; 至少一个非 None 必传. 首次认证必传 `score` (旧值是 None)
+- `find_concept_by_link` 加 `match_score` (1.0 exact / 0.9 startswith / 0.5 contains / 0.4 title), 完全不相关过滤掉, 按 score DESC + slug 长度 ASC 排序
+- `mark_certified` 用 microsecond 精度时间戳 (`_utc_now_iso()` 是 seconds 精度, 同秒两次认证会撞 `certification_log` 的 (concept_id, certified_at) PK)
 - 同一 (source, concept) 可多次抽取，每次都记 extractions 一行（audit history）
 
 **Schema 版本**：当前 `SCHEMA_VERSION=2`。`init_db()` 检测 `schema_meta` 表：

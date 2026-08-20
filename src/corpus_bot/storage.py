@@ -916,6 +916,72 @@ def remove_source_from_concept(
     }
 
 
+def remove_extraction(db_path: Path, extraction_id: str) -> dict[str, Any]:
+    """细粒度撤一次抽取: 删 extractions 行 + sync concept.source_ids.
+
+    如果该 sid 在该 concept 上无其它 extraction 引用, 从 concept.source_ids 移除,
+    并按需 is_orphan=1. 与 remove_source_from_concept (粗粒度) 互为补充.
+
+    Returns: {
+        "extraction_id", "deleted": True,
+        "concept_slug", "source_id",
+        "concept_source_ids_after": [...],
+        "concept_is_orphan_after": bool,
+    }
+    """
+    now = _utc_now_iso()
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT concept_slug, source_id FROM extractions WHERE extraction_id=?",
+            (extraction_id,),
+        ).fetchone()
+        if not row:
+            raise StorageError(f"extraction not found: {extraction_id}")
+        concept_slug = row["concept_slug"]
+        source_id = row["source_id"]
+
+        cur = conn.execute(
+            "DELETE FROM extractions WHERE extraction_id=?",
+            (extraction_id,),
+        )
+        if cur.rowcount == 0:
+            raise StorageError(f"extraction vanished: {extraction_id}")
+
+        # 是否有其它 extraction 仍引用 (concept_slug, source_id)?
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS n FROM extractions WHERE concept_slug=? AND source_id=?",
+            (concept_slug, source_id),
+        ).fetchone()["n"]
+
+        crow = conn.execute(
+            "SELECT source_ids FROM concepts WHERE slug=?",
+            (concept_slug,),
+        ).fetchone()
+        if crow is None:
+            # concept 不存在 (理论不应发生, extractions.concept_slug 是无 FK 软引用)
+            new_source_ids: list[str] = []
+            is_orphan_after = 0
+        else:
+            old_ids = set(_parse_json_list(crow["source_ids"]))
+            if remaining == 0:
+                old_ids.discard(source_id)
+            new_source_ids = sorted(old_ids)
+            is_orphan_after = 1 if not new_source_ids else 0
+            conn.execute(
+                "UPDATE concepts SET source_ids=?, is_orphan=?, updated_at=? WHERE slug=?",
+                (json.dumps(new_source_ids), is_orphan_after, now, concept_slug),
+            )
+
+    return {
+        "extraction_id": extraction_id,
+        "deleted": True,
+        "concept_slug": concept_slug,
+        "source_id": source_id,
+        "concept_source_ids_after": new_source_ids,
+        "concept_is_orphan_after": bool(is_orphan_after),
+    }
+
+
 def get_concept_evidence(
     db_path: Path, slug: str, source_id: str,
 ) -> dict[str, Any] | None:
@@ -1037,32 +1103,45 @@ def list_uncertified_concepts(
 
 
 def find_concept_by_link(db_path: Path, link_target: str) -> list[dict[str, Any]]:
-    """解析 [[wikilink]] → candidate concept list。"""
+    """解析 [[wikilink]] → candidate concept list, 按 match_score 倒序 + slug 长度正序.
+
+    评分:
+      1.0  exact slug match
+      0.9  slug startswith target
+      0.5  slug contains target (substring)
+      0.4  title contains target (case-insensitive, 不区分大小写)
+
+    score == 0 的完全不相关过滤掉; 放宽 LIMIT 50 (旧 10 太紧).
+    corpus-bot 设计接受小规模 (< 10k concepts), 全表扫描 OK.
+    """
     from .ids import slugify
-    exact_slug = slugify(link_target)
+    target_slug = slugify(link_target)
+    target_lower = link_target.lower().strip()
     with connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM concepts WHERE slug=?", (exact_slug,)
-        ).fetchone()
-        if row:
-            d = dict(row)
-            d["source_ids"] = _parse_json_list(d["source_ids"])
-            d["links"] = _parse_json_list(d["links"])
-            d["is_orphan"] = bool(d["is_orphan"])
-            return [d]
-        like_pattern = f"%{exact_slug}%"
-        rows = conn.execute(
-            "SELECT * FROM concepts WHERE slug LIKE ? LIMIT 10",
-            (like_pattern,),
-        ).fetchall()
-    out = []
+        rows = conn.execute("SELECT * FROM concepts").fetchall()
+    candidates: list[dict[str, Any]] = []
     for r in rows:
         d = dict(r)
         d["source_ids"] = _parse_json_list(d["source_ids"])
         d["links"] = _parse_json_list(d["links"])
         d["is_orphan"] = bool(d["is_orphan"])
-        out.append(d)
-    return out
+        slug = d["slug"]
+        title = d.get("title", "")
+        score = 0.0
+        if slug == target_slug:
+            score = 1.0
+        elif slug.startswith(target_slug):
+            score = 0.9
+        elif target_slug and target_slug in slug:
+            score = 0.5
+        elif target_lower and target_lower in title.lower():
+            score = 0.4
+        if score == 0.0:
+            continue
+        d["match_score"] = round(score, 3)
+        candidates.append(d)
+    candidates.sort(key=lambda c: (-c["match_score"], len(c["slug"])))
+    return candidates[:50]
 
 
 # ============================================================================
@@ -1073,21 +1152,59 @@ def mark_certified(
     db_path: Path,
     *,
     slug: str,
-    score: float,
-    issues: list[str],
-    suggestions: list[str],
+    score: float | None = None,
+    issues: list[str] | None = None,
+    suggestions: list[str] | None = None,
     certified_by: str = "agent",
 ) -> dict[str, Any]:
-    """标记 concept 已认证。同时写 certification_log。"""
-    if not 0.0 <= score <= 1.0:
+    """标记 / 部分更新 concept 认证. 同时写 certification_log.
+
+    各字段语义:
+      - score=None       → 保留旧 score (首次认证必传)
+      - issues=None      → 保留旧 issues
+      - suggestions=None → 保留旧 suggestions
+      - 传 list (含 [])  → 覆盖
+
+    至少要传一个非 None 字段, 否则报 StorageError (无 update 内容).
+    """
+    if score is None and issues is None and suggestions is None:
+        raise StorageError(
+            "no fields to update",
+            hint="pass at least one of --score / --issues / --suggestions",
+        )
+    if score is not None and not 0.0 <= score <= 1.0:
         raise StorageError(f"score must be in [0, 1], got {score}")
-    now = _utc_now_iso()
+
+    # 用 microsecond 精度: certification_log PK 是 (concept_id, certified_at),
+    # 同秒内多次 partial update 会撞 PK; microsecond 精度天然避开.
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     with connect(db_path) as conn:
         row = conn.execute(
-            "SELECT concept_id FROM concepts WHERE slug=?", (slug,)
+            """SELECT concept_id, certified_score, certified_issues,
+                      certified_suggestions, certified_at
+            FROM concepts WHERE slug=?""",
+            (slug,),
         ).fetchone()
         if not row:
             raise StorageError(f"concept not found: {slug}")
+
+        old_score = row["certified_score"]
+        old_issues = _parse_json_list(row["certified_issues"])
+        old_suggestions = _parse_json_list(row["certified_suggestions"])
+        prev_certified_at = row["certified_at"]
+
+        if score is not None:
+            new_score = score
+        else:
+            if old_score is None:
+                raise StorageError(
+                    "score is required for first-time certification",
+                    hint="concepts.uncertified list + first certify must include --score",
+                )
+            new_score = old_score
+
+        new_issues = issues if issues is not None else old_issues
+        new_suggestions = suggestions if suggestions is not None else old_suggestions
 
         conn.execute(
             """UPDATE concepts SET
@@ -1095,18 +1212,27 @@ def mark_certified(
             certified_suggestions=?, certified_by=?, updated_at=?
             WHERE slug=?""",
             (
-                now, score, json.dumps(issues),
-                json.dumps(suggestions), certified_by, now, slug,
+                now, new_score, json.dumps(new_issues),
+                json.dumps(new_suggestions), certified_by, now, slug,
             ),
         )
         conn.execute(
             """INSERT INTO certification_log
             (concept_id, certified_at, score, issues, suggestions, certified_by)
             VALUES (?, ?, ?, ?, ?, ?)""",
-            (row["concept_id"], now, score, json.dumps(issues), json.dumps(suggestions), certified_by),
+            (row["concept_id"], now, new_score, json.dumps(new_issues),
+             json.dumps(new_suggestions), certified_by),
         )
 
-    return {"slug": slug, "score": score, "certified_at": now}
+    return {
+        "slug": slug,
+        "score": new_score,
+        "issues": new_issues,
+        "suggestions": new_suggestions,
+        "certified_at": now,
+        "prev_certified_at": prev_certified_at,
+        "partial_update": score is None or issues is None or suggestions is None,
+    }
 
 
 def unmark_certified(db_path: Path, slug: str) -> dict[str, Any]:
