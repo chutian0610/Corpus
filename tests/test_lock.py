@@ -94,7 +94,7 @@ def test_cli_concurrent_writes_all_succeed(tmp_path: Path):
     import threading
     def worker(name, src):
         r = subprocess.run(
-            ["python3", "-m", "corpus", "sources", "ingest", str(vault), str(src), "--json"],
+            ["python3", "-m", "corpus", "sources", "add", str(vault), str(src), "--json"],
             cwd="/Users/didi/myprojects/CorpusBot", env=env,
             capture_output=True, text=True, timeout=15,
         )

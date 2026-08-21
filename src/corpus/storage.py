@@ -665,6 +665,11 @@ def stage_source(
                         existing_id,
                     ),
                 )
+                try:
+                    log_ingest(db_path, op="revive", source_id=existing_id,
+                               source_path=str(raw_path), source_content_hash=content_hash)
+                except Exception:
+                    pass
                 return {
                     "source_id": existing_id,
                     "raw_path": str(raw_path),
@@ -694,6 +699,11 @@ def stage_source(
             )
         except sqlite3.IntegrityError as e:
             raise ConflictError(f"source_id collision: {sid}", hint=str(e)) from e
+        try:
+            log_ingest(db_path, op="stage", source_id=sid, source_path=str(raw_path),
+                       source_content_hash=content_hash)
+        except Exception:
+            pass
 
     return {
         "source_id": sid,
@@ -729,6 +739,10 @@ def commit_source(db_path: Path, source_id: str) -> dict[str, Any]:
         )
         if cur.rowcount == 0:
             raise StorageError(f"source not found: {source_id}")
+    try:
+        log_ingest(db_path, op="commit", source_id=source_id)
+    except Exception:
+        pass
     return {"source_id": source_id, "status": "committed", "committed_at": now}
 
 
@@ -849,6 +863,13 @@ def soft_delete_source(
             if is_orphan_now:
                 orphans_created += 1
 
+    try:
+        log_ingest(db_path, op="delete", source_id=source_id,
+                   details={"reason": deleted_reason,
+                            "affected_concepts": [c["slug"] for c in affected_concepts],
+                            "orphans_created": orphans_created})
+    except Exception:
+        pass
     return {
         "source_id": source_id,
         "deleted_at": now,
@@ -2713,6 +2734,12 @@ def mark_source_state(
                 WHERE source_id=?""",
                 (new_status, source_id),
             )
+    try:
+        if old_status != new_status:
+            log_ingest(db_path, op=new_status, source_id=source_id,
+                       details={"old_status": old_status, "reason": reason})
+    except Exception:
+        pass
     return {
         "source_id": source_id,
         "old_status": old_status,

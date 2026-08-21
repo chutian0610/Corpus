@@ -830,7 +830,7 @@ def test_write_concept_concurrent_insert_one_loses(tmp_path: Path):
     src.write_text("x content")
     env = {**os.environ, "PYTHONPATH": "src"}
     sid = _json.loads(subprocess.run(
-        ["python3", "-m", "corpus", "sources", "ingest", str(vault), str(src), "--json"],
+        ["python3", "-m", "corpus", "sources", "add", str(vault), str(src), "--json"],
         cwd="/Users/didi/myprojects/CorpusBot", env=env,
         capture_output=True, text=True, check=True).stdout)["source_id"]
 
@@ -937,7 +937,7 @@ def test_update_concept_cas_concurrent_subprocess(tmp_path: Path):
     src.write_text("x content")
     env = {**os.environ, "PYTHONPATH": "src"}
     sid = json.loads(subprocess.run(
-        ["python3", "-m", "corpus", "sources", "ingest", str(vault), str(src), "--json"],
+        ["python3", "-m", "corpus", "sources", "add", str(vault), str(src), "--json"],
         cwd="/Users/didi/myprojects/CorpusBot", env=env, capture_output=True, text=True, check=True).stdout)["source_id"]
     # write concept
     subprocess.run(

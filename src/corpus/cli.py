@@ -20,39 +20,30 @@ from .errors import ConflictError, CorpusBotError, StorageError, ValidationError
 from .ids import source_id_from_content
 from .storage import (
     SCHEMA_VERSION,
-    add_source_to_concept,
-    dedup_candidate_scores,
-    list_ingest_log,
-    read_concept,
-    write_concept_file,
-    write_source_wiki_page,
-    update_source_page_concepts,
-    restore_from_files,
-    write_source_file,
     certification_stats,
-    commit_source,
     delete_concept,
     dry_run_delete_source,
-    remove_extraction,
     export_index,
     find_concept_by_link,
     get_concept_evidence,
+    hard_delete_source,
     init_db,
     is_initialized,
     list_concepts,
+    list_ingest_log,
     list_sources,
-    list_uncertified_concepts,
     mark_certified,
     read_concept,
     read_source,
-    remove_source_from_concept,
-    search_concepts,
+    restore_from_files,
     soft_delete_source,
-    hard_delete_source,
     stage_source,
-    unmark_certified,
     update_concept,
+    update_source_page_concepts,
     write_concept,
+    write_concept_file,
+    write_source_file,
+    write_source_wiki_page,
 )
 from .vault import (
     _ensure_git_repo,
@@ -65,8 +56,6 @@ from .vault import (
 )
 from .atomic import atomic_write_text
 from .lock import vault_file_lock  # utility (CLI 默认不用)
-
-
 
 
 def _sync_concept_file(paths, slug: str) -> None:
@@ -102,8 +91,6 @@ def _sync_concept_file(paths, slug: str) -> None:
     for sid in info["source_ids"]:
         update_source_page_concepts(paths["root"], sid)
 
-
-
 # ---------- helpers ----------
 
 def _err(msg: str, *, hint: str | None = None, code: int = 1) -> None:
@@ -113,13 +100,11 @@ def _err(msg: str, *, hint: str | None = None, code: int = 1) -> None:
         click.echo(f"error: {msg}", err=True)
     sys.exit(code)
 
-
 def _emit(data, *, as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps(data, indent=2, ensure_ascii=False))
     else:
         click.echo(_humanize(data))
-
 
 def _humanize(data) -> str:
     """简短的文本格式（默认输出，便于人眼扫）。"""
@@ -131,7 +116,6 @@ def _humanize(data) -> str:
             lines.append(_humanize_one(item))
         return "\n".join(lines)
     return _humanize_one(data)
-
 
 def _humanize_one(item) -> str:
     if not isinstance(item, dict):
@@ -150,7 +134,6 @@ def _humanize_one(item) -> str:
         )
     return json.dumps(item, ensure_ascii=False)
 
-
 def _resolve_db(vault_root: Path, *, ensure_vault_dir: bool = True):
     """解析 vault 路径, 返回 db_path.
 
@@ -167,13 +150,11 @@ def _resolve_db(vault_root: Path, *, ensure_vault_dir: bool = True):
     init_db(paths["corpus_db"])  # idempotent + auto-migrate
     return paths
 
-
 def _read_file(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return path.read_text(encoding="latin-1")
-
 
 def _ingest_one_source(
     paths: dict,
@@ -259,7 +240,6 @@ def _ingest_one_source(
 
     return result
 
-
 # ---------- top-level group ----------
 
 @click.group()
@@ -279,13 +259,11 @@ def cli() -> None:
     LLM 调用（extract / compile / 评分）由 agent 自己做，corpus 不装 LLM。
     """
 
-
 # ---------- vault ----------
 
 @cli.group()
 def vault() -> None:
     """vault 生命周期：init / info / stats。"""
-
 
 @vault.command(name="init")
 @click.argument("vault_path", type=click.Path(path_type=Path))
@@ -328,7 +306,6 @@ def vault_init(
         as_json=as_json,
     )
 
-
 @vault.command(name="inspect")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.option("--json", "as_json", is_flag=True)
@@ -350,32 +327,11 @@ def vault_inspect(vault_path: Path, as_json: bool) -> None:
         as_json=as_json,
     )
 
-
-# 兼容性 alias: 老的 `vault info` / `vault stats` 现在都 forward 到 `vault inspect`
-@vault.command(name="info", hidden=True)
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.option("--json", "as_json", is_flag=True)
-def vault_info_alias(vault_path: Path, as_json: bool) -> None:
-    """[deprecated] alias for `vault inspect`. 会下个 release 删."""
-    ctx = click.get_current_context()
-    ctx.forward(vault_inspect)
-
-
-@vault.command(name="stats", hidden=True)
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.option("--json", "as_json", is_flag=True)
-def vault_stats_alias(vault_path: Path, as_json: bool) -> None:
-    """[deprecated] alias for `vault inspect`. 会下个 release 删."""
-    ctx = click.get_current_context()
-    ctx.forward(vault_inspect)
-
-
 # ---------- sources ----------
 
 @cli.group()
 def sources() -> None:
     """源文件管理：ingest / batch / list / show / commit / delete。"""
-
 
 @sources.command(name="add")
 @click.argument("vault_path", type=click.Path(path_type=Path))
@@ -461,24 +417,6 @@ def sources_add(vault_path: Path, path: Path, glob_pattern: str, recursive: bool
     except CorpusBotError as e:
         _err(str(e), hint=getattr(e, "hint", None))
 
-
-# 老 `sources batch` 改为 alias — 调用 sources_add (dir 模式)
-@sources.command(name="batch", hidden=True)
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("source_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option("--glob", "glob_pattern", default="*.md", help="[deprecated] 走 sources add --glob")
-@click.option("--recursive/--no-recursive", default=True, help="[deprecated] 走 sources add --recursive/--no-recursive")
-@click.option("--force-revive", is_flag=True, help="[deprecated] 走 sources add --force-revive")
-@click.option("--json", "as_json", is_flag=True)
-def sources_batch_alias(vault_path: Path, source_dir: Path, glob_pattern: str,
-                         recursive: bool, force_revive: bool, as_json: bool) -> None:
-    """[deprecated] alias for `sources add <vault> <dir>`. 下 release 删."""
-    ctx = click.get_current_context()
-    ctx.invoke(sources_add, vault_path=vault_path, path=source_dir,
-               glob_pattern=glob_pattern, recursive=recursive,
-               force_revive=force_revive, as_json=as_json)
-
-
 @sources.command(name="list")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.option("--status", type=click.Choice(["staged", "committed", "deleted", "all"]), default="all")
@@ -492,7 +430,6 @@ def sources_list(vault_path: Path, status: str, limit: int, offset: int, as_json
     items = list_sources(paths["corpus_db"], status=status_filter, limit=limit, offset=offset)
     _emit(items, as_json=as_json)
 
-
 @sources.command(name="show")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("source_id")
@@ -503,7 +440,6 @@ def sources_show(vault_path: Path, source_id: str, as_json: bool) -> None:
     if not item:
         _err(f"source not found: {source_id}")
     _emit(item, as_json=as_json)
-
 
 @sources.command(name="mark-state")
 @click.argument("vault_path", type=click.Path(path_type=Path))
@@ -532,31 +468,7 @@ def sources_mark_state(
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
 
-
-# 兼容 alias: 老 `sources commit` → mark-state --status committed
-@sources.command(name="commit", hidden=True)
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("source_id")
-@click.option("--json", "as_json", is_flag=True)
-def sources_commit_alias(vault_path: Path, source_id: str, as_json: bool) -> None:
-    """[deprecated] alias for `sources mark-state --status committed`. 下 release 删."""
-    ctx = click.get_current_context()
-    ctx.forward(sources_mark_state, source_id=source_id, status="committed")
-
-
-
 # 老 `sources ingest <vault> <file>` 改为 alias — 转发到 sources_add
-@sources.command(name="ingest", hidden=True)
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("source_file", type=click.Path(exists=False, path_type=Path))
-@click.option("--force-revive", is_flag=True, help="[deprecated] 走 sources add --force-revive")
-@click.option("--json", "as_json", is_flag=True)
-def sources_ingest_alias(vault_path: Path, source_file: Path, force_revive: bool, as_json: bool) -> None:
-    """[deprecated] alias for `sources add <vault> <file>`. 下 release 删."""
-    ctx = click.get_current_context()
-    # sources_add 期望 path= 参数. 用 explicit kwargs 避免 click 把 source_file 透传
-    ctx.invoke(sources_add, vault_path=vault_path, path=source_file,
-               force_revive=force_revive, as_json=as_json)
 @sources.command(name="delete")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("source_id")
@@ -569,36 +481,6 @@ def sources_delete(vault_path: Path, source_id: str, yes: bool, dry_run: bool, r
 
     默认先 dry-run 看 impact；--yes 跳过 dry-run 直接执行。
     """
-    paths = _resolve_db(vault_path)
-    # 显示 dry-run preview（除非已经 --yes 强制执行）
-    if not yes:
-        try:
-            preview = dry_run_delete_source(paths["corpus_db"], source_id)
-        except Exception as e:
-            _err(str(e))
-        if as_json:
-            click.echo(json.dumps(preview, indent=2, ensure_ascii=False))
-        else:
-            click.echo("=== DRY RUN: source delete impact ===")
-            click.echo(f"  source_id: {source_id}")
-            click.echo(f"  current_status: {preview['current_status']}")
-            click.echo(f"  affected_concepts: {preview['affected_concepts_count']}")
-            if preview["would_become_orphans"]:
-                click.echo(f"  will orphan: {preview['would_become_orphans']}")
-            for c in preview["still_supported"]:
-                click.echo(f"  still supported (other sources): {c}")
-            click.echo("")
-            click.echo(f"  recommendation: {preview['recommendation']}")
-            click.echo("")
-            click.echo("  pass --yes to actually delete")
-        if dry_run:
-            return  # 默认 dry-run 模式下永远不执行删除
-    try:
-        result = soft_delete_source(paths["corpus_db"], source_id, deleted_reason=reason)
-    except Exception as e:
-        _err(str(e), hint=getattr(e, "hint", None))
-    _emit(result, as_json=as_json)
-
 
 # ---------- concepts ----------
 
@@ -626,22 +508,52 @@ def cli_index(subcmd: str, vault_path: Path, out_dir: Path | None, as_json: bool
         _err(str(e))
     _emit(result, as_json=as_json)
 
-
-# 兼容性 alias (subcommand 名字从 sync → snapshot 自动迁移)
-@cli.command(name="sync", hidden=True,
-             context_settings={"ignore_unknown_options": True})
+# 顶层 history / rebuild (从 ingest_log 审计 + 从文件系统重建 DB)
+@cli.command(name="history")
 @click.argument("vault_path", type=click.Path(path_type=Path))
+@click.option("--op", default=None,
+              help="过滤 op: stage / revive / commit / delete / batch")
+@click.option("--source-id", default=None)
+@click.option("--since", default=None, help="ISO timestamp, 返 started_at >= since")
+@click.option("--limit", type=int, default=50)
 @click.option("--json", "as_json", is_flag=True)
-def cli_index_sync_alias(vault_path: Path, as_json: bool) -> None:
-    """[deprecated] alias for `corpus index snapshot`. 下 release 删。"""
-    ctx = click.get_current_context()
-    ctx.invoke(cli_index, subcmd="snapshot", vault_path=vault_path, as_json=as_json)
+def cli_history(vault_path, op, source_id, since, limit, as_json):
+    """查 ingest_log (操作审计, 按 started_at DESC + id DESC 排序).
 
+    corpus history <vault> -- 等价于上游老的 corpus audit (已删).
+    """
+    paths = _resolve_db(vault_path)
+    rows = list_ingest_log(
+        paths["corpus_db"],
+        op=op,
+        source_id=source_id,
+        since=since,
+        limit=limit,
+    )
+    _emit(rows, as_json=as_json)
+
+@cli.command(name="rebuild")
+@click.argument("vault_path", type=click.Path(path_type=Path))
+@click.option("--dry-run/--no-dry-run", default=True,
+              help="默认 dry-run (只统计不写); 传 --no-dry-run 真正重建.")
+@click.option("--json", "as_json", is_flag=True)
+def cli_rebuild(vault_path, dry_run, as_json):
+    """从文件系统重建整个 DB.
+
+    适用场景: 换电脑 / .wiki-meta/corpus.db 损坏 / 跨平台迁移.
+    等价于上游老的 corpus restore-from-files (已删).
+    不会改 git tracked 的 markdown 文件, 只重写 .wiki-meta/corpus.db.
+    """
+    paths = _resolve_db(vault_path)
+    try:
+        result = restore_from_files(vault_path, dry_run=dry_run)
+    except Exception as e:
+        _err(str(e), hint=getattr(e, "hint", None))
+    _emit(result, as_json=as_json)
 
 @cli.group()
 def concepts() -> None:
-    """Wiki concept 管理：write / show / list / search / find-by-link / update / 认证。"""
-
+    """Wiki concept 管理：write / show / list / find / update / link / unlink / delete / 认证。"""
 
 @concepts.command(name="write")
 @click.argument("vault_path", type=click.Path(path_type=Path))
@@ -751,7 +663,6 @@ def concepts_write(
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
 
-
 @concepts.command(name="update")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("slug")
@@ -844,7 +755,6 @@ def concepts_update(
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
 
-
 @concepts.command(name="link")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("slug")
@@ -877,7 +787,6 @@ def concepts_link(
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
-
 
 @concepts.command(name="unlink")
 @click.argument("vault_path", type=click.Path(path_type=Path))
@@ -914,82 +823,12 @@ def concepts_unlink(
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
 
-
 # 兼容 alias: add-source / remove-source / remove-extraction
 
 
 
 
-
-
-
-
 # 兼容 alias: add-source / remove-source / remove-extraction / evidence
-@concepts.command(name="add-source", hidden=True)
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("slug")
-@click.option("--source-id", required=True)
-@click.option("--quote-span", required=True)
-@click.option("--prompt-version", default=None)
-@click.option("--json", "as_json", is_flag=True)
-def concepts_add_source_alias(vault_path: Path, slug: str, source_id: str,
-                                quote_span: str, prompt_version: str | None, as_json: bool) -> None:
-    """[deprecated] alias for `concepts link`. 下 release 删."""
-    ctx = click.get_current_context()
-    ctx.invoke(concepts_link, vault_path=vault_path, slug=slug, source_id=source_id,
-               quote_span=quote_span, prompt_version=prompt_version, as_json=as_json)
-
-
-@concepts.command(name="remove-source", hidden=True)
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("slug")
-@click.option("--source-id", required=True)
-@click.option("--json", "as_json", is_flag=True)
-def concepts_remove_source_alias(vault_path: Path, slug: str, source_id: str, as_json: bool) -> None:
-    """[deprecated] alias for `concepts unlink --source`. 下 release 删."""
-    ctx = click.get_current_context()
-    ctx.invoke(concepts_unlink, vault_path=vault_path, slug=slug,
-               source_id=source_id, as_json=as_json)
-
-
-@concepts.command(name="remove-extraction", hidden=True)
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("extraction_id")
-@click.option("--json", "as_json", is_flag=True)
-def concepts_remove_extraction_alias(vault_path: Path, extraction_id: str, as_json: bool) -> None:
-    """[deprecated] — 用 corpus concepts show <slug> --source SID 列 evidence, 找到目标 extraction_id
-    后用 `corpus concepts unlink --extraction-id X` 撤单条. 下 release 删."""
-    # extraction_id 唯一且跨 concept 全局, 反查 slug
-    try:
-        from .storage import connect
-        with connect(vault_path / ".wiki-meta" / "corpus.db") as conn:
-            row = conn.execute(
-                "SELECT concept_slug FROM extractions WHERE extraction_id=?",
-                (extraction_id,),
-            ).fetchone()
-            if not row:
-                _err(f"extraction not found: {extraction_id}", hint="先 corpus audit | sqlite3 .wiki-meta/corpus.db 查 extractions 表")
-                return
-            slug = row["concept_slug"]
-        ctx = click.get_current_context()
-        ctx.invoke(concepts_unlink, vault_path=vault_path, slug=slug,
-                   extraction_id=extraction_id, as_json=as_json)
-    except Exception as e:
-        _err(str(e), hint=getattr(e, "hint", None))
-
-
-@concepts.command(name="evidence", hidden=True)
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("slug")
-@click.option("--source-id", default=None)
-@click.option("--json", "as_json", is_flag=True)
-def concepts_evidence_alias(vault_path: Path, slug: str, source_id: str | None, as_json: bool) -> None:
-    """[deprecated] alias for `concepts show <slug> --source <SID>`. 下 release 删."""
-    ctx = click.get_current_context()
-    ctx.invoke(concepts_show, vault_path=vault_path, slug=slug,
-               source_id=source_id, as_json=as_json)
-
-
 @concepts.command(name="show")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("slug")
@@ -1010,7 +849,6 @@ def concepts_show(vault_path: Path, slug: str, source_id: str | None, as_json: b
     if not item:
         _err(f"concept not found: {slug}")
     _emit(item, as_json=as_json)
-
 
 @concepts.command(name="list")
 @click.argument("vault_path", type=click.Path(path_type=Path))
@@ -1048,87 +886,22 @@ def concepts_list(
     )
     _emit(items, as_json=as_json)
 
-
-@concepts.command(name="search")
+@concepts.command(name="find")
 @click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("query")
-@click.option("--limit", type=int, default=10)
+@click.option("--by-link", "link", required=True, help="slug 或 wikilink 文本 (必传, 用于 dedup)")
+@click.option("--limit", type=int, default=10, help="最多返 N 个候选 (默认 10)")
 @click.option("--json", "as_json", is_flag=True)
-def concepts_search(vault_path: Path, query: str, limit: int, as_json: bool) -> None:
-    paths = _resolve_db(vault_path)
-    items = search_concepts(paths["corpus_db"], query, limit=limit)
-    _emit(items, as_json=as_json)
+def concepts_find(vault_path: Path, link: str, limit: int, as_json: bool) -> None:
+    """wikilink -> candidate concept list (dedup 用). 按 match_score DESC + slug 长度 ASC 排序.
 
-
-@concepts.command(name="find-by-link")
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("link")
-@click.option("--json", "as_json", is_flag=True)
-def concepts_find_by_link(vault_path: Path, link: str, as_json: bool) -> None:
-    """解析 wikilink → candidate concept list（dedup 用）.
-
-    评分: discrete (exact/startswith/contains/title) + difflib fuzzy bonus.
+    评分 = discrete 几档 (exact 1.0 / startswith 0.9 / contains 0.5 / title 0.4)
+        + difflib.SequenceMatcher.ratio() * 0.3 fuzzy bonus (capped at 1.0).
+    完全不相关 (score 0) 过滤掉. --limit default 10 (storage 内层 LIMIT 50).
     """
     paths = _resolve_db(vault_path)
     items = find_concept_by_link(paths["corpus_db"], link)
-    _emit(items, as_json=as_json)
-
-
-@concepts.command(name="dedup-candidates")
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("slug")
-@click.option("--limit", "-n", type=int, default=20, help="最多返 N 个候选 (默认 20)")
-@click.option("--json", "as_json", is_flag=True)
-def concepts_dedup_candidates(
-    vault_path: Path, slug: str, limit: int, as_json: bool,
-) -> None:
-    """返 dedup 候选 + 多维度分数, 让 LLM 二次判断 '这两个 concept 真的是同一个吗'.
-
-    字段:
-      - discrete_score (0-1): 离散几档 (exact/startswith/contains/title_contains)
-      - fuzzy_score (0-0.3): difflib.SequenceMatcher.ratio() 连续相似度
-      - length_diff: |len(slug) - len(target)| (同 score 时短 slug 优先)
-      - match_score (0-1): min(1.0, discrete + fuzzy) 综合
-
-    比 find-by-link 多了 fuzzy 细节, 让 LLM 知道 'score=0.7' 怎么来的 (discrete 0.4 + fuzzy 0.3
-    vs discrete 0.9 + fuzzy 0.0 含义不同). LLM 拿到后用自己语义能力判断.
-
-    不调 LLM, 纯 storage 计算. LLM 决策权在 agent 端.
-    """
-    paths = _resolve_db(vault_path)
-    candidates = dedup_candidate_scores(paths["corpus_db"], slug, limit=limit)
-    if as_json:
-        _emit(
-            {
-                "query": slug,
-                "total": len(candidates),
-                "candidates": candidates,
-            },
-            as_json=True,
-        )
-        return
-    if not candidates:
-        _emit(f"(no candidates for: {slug})", as_json=False)
-        return
-    click.echo(f"dedup candidates for '{slug}' ({len(candidates)} entries):")
-    for c in candidates:
-        click.echo(
-            f"  match={c['match_score']:.3f}  "
-            f"discrete={c['discrete_score']:.2f}  "
-            f"fuzzy={c['fuzzy_score']:.2f}  "
-            f"len_diff={c['length_diff']:>2}  "
-            f"sources={c['source_count']:>2}  "
-            f"{c['slug']:<32} {c['title']}"
-        )
-
-
-@concepts.command(name="uncertified")
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.option("--limit", type=int, default=20)
-@click.option("--json", "as_json", is_flag=True)
-def concepts_uncertified(vault_path: Path, limit: int, as_json: bool) -> None:
-    paths = _resolve_db(vault_path)
-    items = list_uncertified_concepts(paths["corpus_db"], limit=limit)
+    if limit > 0:
+        items = items[:limit]
     _emit(items, as_json=as_json)
 
 
@@ -1173,7 +946,6 @@ def concepts_certify(
     _sync_concept_file(paths, slug)
     _emit(result, as_json=as_json)
 
-
 @concepts.command(name="delete")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("slug")
@@ -1208,22 +980,6 @@ def concepts_delete(
         _err(str(e), hint=getattr(e, "hint", None))
 
 
-@concepts.command(name="unmark")
-@click.argument("vault_path", type=click.Path(path_type=Path))
-@click.argument("slug")
-@click.option("--json", "as_json", is_flag=True)
-def concepts_unmark(vault_path: Path, slug: str, as_json: bool) -> None:
-    paths = _resolve_db(vault_path)
-    try:
-        result = unmark_certified(paths["corpus_db"], slug)
-    except Exception as e:
-        _err(str(e))
-    _emit(result, as_json=as_json)
-
-
-
-
-
 
 def main() -> int:
     """CLI entry point."""
@@ -1240,7 +996,6 @@ def main() -> int:
         if e.hint:
             click.echo(f"  hint: {e.hint}", err=True)
         return 1
-
 
 if __name__ == "__main__":
     sys.exit(main())
