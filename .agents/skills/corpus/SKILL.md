@@ -37,7 +37,7 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 | 把 markdown / 文章入库到 vault | **`corpus-ingest`** skill (`.agents/skills/corpus-ingest/SKILL.md`) |
 | 查 / 搜 / 读 / 删 concept | 用本 skill 的 CLI 速查, 直接调 `corpus concepts ...` |
 | 认证 / 评分 concept | 用本 skill 的 `corpus concepts certify` |
-| 看 audit log | 用本 skill 的 `corpus audit` |
+| 看 audit log | 用 `corpus history <vault>` |
 | 改 vault 配置 (git / auto commit 等) | `corpus-config` skill (未来) |
 | 维护 (delete orphan / staleness) | `corpus-maintain` skill (未来) |
 
@@ -47,7 +47,7 @@ description: 把 markdown 资料入库到本地 vault，自动构建结构化 wi
 
 ## dedup 决策启发式
 
-`concepts find-by-link vault "<wikilink 文本>"` 返回候选列表：
+`corpus concepts find <vault> --by-link "<wikilink 文本>"` 返回候选列表：
 
 - **0 个候选** → 新概念，写
 - **1 个候选** → 看 slug 相似度 + title 相似度，agent 自己判断
@@ -70,13 +70,13 @@ error: <message>
 - `duplicate content exists but is deleted: ...` → 同 hash 已 soft-deleted,加 `--force-revive` 复活
 - `concept slug already exists` → 用 `concepts update` 而非 `write`
 (links 相关的错已下架: --links / --add-links CLI flag 不再存在; outgoing links 全从 body 的 [[wikilinks]] 自动派生. 自引用 / unsafe slug 在写入时被 _extract_wikilinks 安全过滤掉, 不抛错.)
-- `extraction not found` → `concepts remove-extraction` 的 id 不存在
+- `extraction not found` → `concepts unlink --extraction-id X` 时 id 不存在
 - `concept ... was modified concurrently` → multi-agent CAS 失败 (--expected-version 不匹配), hint 提示 read_concept 重新 read + merge
 - `concept slug already exists` (write_concept) → LLM 重新 find-by-link + read + merge + update_concept (--expected-version). 业务决策不在 storage 静默做.
 - `no fields to update` → `concepts certify` 至少传一个 `--score / --issues / --suggestions`
 - `score is required for first-time certification` → 首次认证必传 `--score` (后续 partial update 可省)
-- `path is inside vault raw/` → `sources ingest` 不接受 vault 内文件. raw/ 是 ingest 产物目录, 想重新入库同一文件先 `sources delete <sid>`
-- (audit log 报错) → `ingest_log` 表是 schema v4 加的, 旧 vault 跑 init_db 自动 migration. 用 `corpus audit` 查操作历史
+- `path is inside vault raw/` → `sources add` 不接受 vault 内文件. raw/ 是 add 产物目录, 想重新入库同一文件先 `sources delete <sid>`
+- (audit log 报错) → `ingest_log` 表是 schema v4 加的, 旧 vault 跑 init_db 自动 migration. 用 `corpus history <vault>` 查操作历史
 - `score must be in [0, 1]` → 0-1 之间的数
 
 sources.batch 的每个 result 也带 `hint` 字段 (deleted 行未带 `--force-revive` 时填)。
@@ -103,9 +103,9 @@ for it in items:
 - ❌ 不维护 in-memory 状态（每次调用都是独立 SQLite 操作）
 - ❌ 不主动重试 / repair / judge（失败立即返回给 agent）
 
-## CLI 速查 (Stage 2 ingest 简化后, 27 → 19 命令)
+## CLI 速查 (Stage 3 cleanup: drop 1-release aliases, 19 → 19 first-class + audit/rebuild 命令入位)
 
-> 旧命令 (列在下面 `[deprecated]` 段) 走 alias 转发到新命令, 1 个 release 后删除. 写新 agent workflow **请用新名字**.
+> 别名段 (--hide, 不在 `--help` 显示) 已删 — 之前标 `[deprecated]` 的 alias 在这个 release 已彻底移除. 写新 agent workflow 用 19 个 first-class 名.
 
 ### vault
 | 命令 | 作用 |
@@ -133,29 +133,23 @@ for it in items:
 | `concepts list <vault> [--orphans / --certified / --uncertified] [--status] [--tag X [--tag Y ...]]` | 过滤. `--certified`/`--uncertified` 互斥; 其他叠加 |
 | `concepts delete <vault> <slug>` | 默认 dry-run, `--no-dry-run` 真删 (同步清 wiki/concept/<slug>.md) |
 | `concepts certify <vault> <slug> --score X [--issues a,b] [--suggestions c,d] [--by agent]` | 首次必传 `--score`; 后续 partial 用 None=保留 / `""`=清空 |
-| `concepts find-by-link <vault> <link>` | wikilink → candidate list, 按 match_score DESC |
-| `concepts search <vault> <query>` | LIKE 搜索 (stage 3 会升 FTS5) |
-| `concepts unmark <vault> <slug>` | 撤销认证 |
+| `concepts find <vault> --by-link <text> [--limit N]` | wikilink → candidate list, 按 match_score DESC (rename 自 find-by-link) |
 
 ### top-level (cross-cutting)
 | 命令 | 作用 |
 |---|---|
-| `corpus history <vault>` | 操作审计 (ingest_log 表). `--op` / `--source-id` / `--since` / `--limit` filter |
-| `corpus rebuild <vault>` | 从文件系统重建整个 DB (换电脑 / DB 损坏时用). `--dry-run` 默认 |
+| `corpus history <vault>` | 操作审计 (ingest_log 表). `--op stage\|revive\|commit\|delete\|batch` / `--source-id` / `--since` / `--limit` filter (默认 50) |
+| `corpus rebuild <vault>` | 从文件系统重建整个 DB (换电脑 / DB 损坏时用). `--dry-run/--no-dry-run` (默认 True) |
 | `corpus index snapshot <vault>` | opt-in 写 `wiki/index/{concepts,sources}.json` 给外部消费者 |
 
-### Deprecated aliases (旧名字可继续用, 1 release 后删)
-| 旧命令 | 当前等价 |
-|---|---|
-| `vault info` / `vault stats` | `vault inspect` |
-| `sources ingest <vault> <file>` | `sources add <vault> <file>` |
-| `sources batch <vault> <dir>` | `sources add <vault> <dir>` |
-| `sources commit <sid>` | `sources mark-state --status committed` |
-| `concepts add-source` | `concepts link` |
-| `concepts remove-source` | `concepts unlink --source SID` |
-| `concepts remove-extraction` | `concepts unlink --extraction-id X` |
-| `concepts evidence` | `concepts show <slug> --source SID` |
-| `corpus audit` | `corpus history` |
-| `corpus restore-from-files` | `corpus rebuild` |
-| `corpus index sync` | `corpus index snapshot` |
+### 命令计数 (Stage 3 cleanup 后)
 
+| 范围 | 数量 | 命令 |
+|---|---|---|
+| `vault` | 2 | init, inspect |
+| `sources` | 5 | add, list, show, mark-state, delete |
+| `concepts` | 9 | find, write, update, link, unlink, show, list, delete, certify |
+| top-level | 3 | index snapshot, history, rebuild |
+| **合计** | **19** | (no aliases remaining) |
+
+之前 `[deprecated]` 段的 11 个 alias (`vault info`/`stats`, `sources ingest`/`batch`/`commit`, `concepts add-source`/`remove-source`/`remove-extraction`/`evidence`/`find-by-link`/`unmark`/`search`, `audit`/`restore-from-files`/`index sync`) 全部删除. 任何旧名直接报 "No such command".

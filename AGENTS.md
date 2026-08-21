@@ -82,15 +82,14 @@ corpus rebuild <vault> [--dry-run]                                       # files
 corpus index snapshot <vault>                                            # 写 wiki/index/{concepts,sources}.json (替代老 index sync)
 ```
 
-deprecated alias (旧名字仍可用, ctx.invoke 转发, 1 release 后删):
-
-```bash
-corpus sources ingest / batch / commit          → sources add / sources add / sources mark-state --status committed
-corpus vault info / stats                        → vault inspect
-corpus audit / restore-from-files / index sync   → history / rebuild / index snapshot
-corpus concepts add-source / remove-source / remove-extraction / evidence  
-                                              → concepts link / unlink --source / unlink --extraction-id / show --source
-```
+> 已删除的 deprecation alias (本次 release 彻底移除, 不再可见 `--help`):
+>
+> - sources: `ingest` / `batch` / `commit` → `sources add` / `sources add` / `sources mark-state --status committed`
+> - vault: `info` / `stats` → `vault inspect`
+> - 顶层: `audit` / `restore-from-files` / `index sync` → `corpus history` / `corpus rebuild` / `corpus index snapshot`
+> - concepts: `add-source` / `remove-source` / `remove-extraction` / `evidence` / `find-by-link` / `unmark` / `search` → `link` / `unlink --source` / `unlink --extraction-id` / `show --source` / `find` / (取消) / (取消)
+>
+> 写新 agent workflow 一律用 first-class 名, 旧名直接报 "No such command".
 
 ## 跑测试
 

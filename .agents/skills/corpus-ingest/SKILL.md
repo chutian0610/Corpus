@@ -2,7 +2,7 @@
 name: corpus-ingest
 description: >
   完整 ingest 工作流: source markdown → vault ingest → LLM 抽 concept → 
-  dedup (find-by-link match_score) → concepts write/update (with CAS).
+  dedup (concepts find match_score) → concepts write/update (with CAS).
   index snapshot 不再自动触发 (opt-in), 想给外部 web UI / dashboard 喂 snapshot
   用 `corpus index snapshot <vault>` 手动跑.
   Use this skill when the user has source content (markdown files, articles, notes, 
@@ -15,7 +15,7 @@ description: >
     2. `corpus sources add <vault> <path>` (file/dir auto-detect; raw_path 自动 <stem>-ingest-<UTC>.<ext>,
        同时写 wiki/source/<slug>.md; Stage 2 替代老的 sources ingest + sources batch)
     3. 对每个 source_id, Read raw/<file> 抽取概念
-    4. corpus concepts find-by-link 查 dedup (match_score >= 0.9 → 已存在, 也匹配 aliases)
+    4. corpus concepts find --by-link 查 dedup (match_score >= 0.9 → 已存在, 也匹配 aliases)
     5a. corpus concepts write (新, --status/--aliases/--tags 可选) — slug 撞抛 ConflictError
     5b. corpus concepts update (已有, --expected-version CAS 防 race) — 含 body / source_ids / status 合并
     5c. `corpus concepts link <slug> --source SID --quote-span "..."` (fold of 老的 add-source; 默认 INSERT 新 extractions row)
@@ -78,7 +78,7 @@ git --version       # git version 2.x+
 # 失败 → 提示装 git (brew/apt/yum/git-scm.com)
 
 # 3. vault 已建
-corpus vault info <vault> --json
+corpus vault inspect <vault> --json
 # 失败 → 提示用 corpus-init skill
 ```
 
@@ -94,7 +94,7 @@ corpus sources add <vault> /path/to/notes/ --glob "*.md" --json
 # 返回: {"total": N, "staged": M, "revived": R, "duplicates": K, "failed": 0, "results": [...]}
 ```
 
-旧名 alias 仍能用 `sources ingest <file>` / `sources batch <dir>`, 1 release 后删.
+`sources add <vault> <path>` 一并替代了 `sources ingest` / `sources batch` (本 release 删除 alias).
 
 重要: source path **必须在 vault 外**. vault 内的文件 (含 raw/) 不能 ingest (避免重复).
 
@@ -177,11 +177,11 @@ Temp 路径 `.tmp/` 在 vault `.gitignore` 顶层 (.agents/skills/corpus-init/SK
 不会提交到 vault git.
 
 
-## Step 3 — Dedup 检查 (find-by-link / dedup-candidates)
+## Step 3 — Dedup 检查 (concepts find / dedup-candidates)
 
-**find-by-link** (单 slug 查询):
+**concepts find** (单 slug 查询, rename 自 find-by-link):
 ```bash
-corpus concepts find-by-link <vault> <candidate-slug> --json
+corpus concepts find --by-link <vault> <candidate-slug> --json
 ```
 
 返回 match_score 排序的候选 (slug + title + match_score):
@@ -210,7 +210,7 @@ corpus concepts dedup-candidates <vault> <slug> [--limit N]
 返每个 candidate 的 discrete / fuzzy / length_diff 分数, 让 LLM 看 'score=0.7' 怎么来的 (discrete 0.4 + fuzzy 0.3 vs discrete 0.9 + fuzzy 0.0 含义不同) 决定是否 merge.
 
 ```python
-result = json.loads(subprocess.run(["corpus", "concepts", "find-by-link", vault, slug, "--json"], ...).stdout)
+result = json.loads(subprocess.run(["corpus", "concepts", "find", vault, "--by-link", slug, "--json"], ...).stdout)
 if not result:
     # 全新, 走 write
     action = "write"
@@ -351,7 +351,7 @@ for sid in $(corpus sources list ~/my-wiki --json | jq -r '.[].source_id'); do
     slug=$(echo "$c" | jq -r .slug)
     
     # dedup
-    existing=$(corpus concepts find-by-link ~/my-wiki $slug --json | jq -r '.[0].slug // empty')
+    existing=$(corpus concepts find ~/my-wiki --by-link $slug --json | jq -r '.[0].slug // empty')
     if [ -n "$existing" ]; then
       v=$(corpus concepts show ~/my-wiki $existing --json | jq -r .version)
       corpus concepts update ~/my-wiki $existing \
