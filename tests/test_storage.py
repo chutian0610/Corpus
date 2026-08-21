@@ -1541,3 +1541,58 @@ def test_find_concept_by_link_matches_aliases(db: Path, staged_source: str):
     # 部分 alias 匹配 (中文)
     candidates = find_concept_by_link(db, "多版本并发")
     assert any(c["slug"] == "postgresql-mvcc" for c in candidates)
+
+
+# ---------- source page slug 文件名 (obsidian 兼容) ----------
+
+def test_pick_source_page_target_no_collision(tmp_path: Path):
+    """pick_source_page_target: 无撞返 base_slug.md."""
+    from corpus.storage import pick_source_page_target
+    target = pick_source_page_target(tmp_path, "postgresql", "abc123de")
+    assert target == tmp_path / "postgresql.md"
+
+
+def test_pick_source_page_target_collision_adds_hash(tmp_path: Path):
+    """slug 重名加 -<short-hash> 后缀 (8 hex, content_hash 前 8)."""
+    from corpus.storage import pick_source_page_target
+    # 第一个: postgresql.md
+    (tmp_path / "postgresql.md").write_text("# v1", encoding="utf-8")
+    # 第二个 (同 slug, 不同 hash): postgresql-abc123de.md
+    target = pick_source_page_target(tmp_path, "postgresql", "abc123de")
+    assert target == tmp_path / "postgresql-abc123de.md"
+    # 第三个: postgresql-fed45678.md
+    target2 = pick_source_page_target(tmp_path, "postgresql", "fed45678")
+    assert target2 == tmp_path / "postgresql-fed45678.md"
+
+
+def test_write_source_wiki_page_uses_slug_filename(tmp_path: Path):
+    """write_source_wiki_page 写 wiki/source/<slug>.md (非 source_id)."""
+    from corpus.storage import write_source_wiki_page, read_source_file
+    p = write_source_wiki_page(
+        tmp_path, "abc123def4560001", slug="postgresql-13",
+        content_hash="abc123de", original_filename="PostgreSQL 13.md",
+        size_bytes=100, status="staged",
+        body="# postgresql content",
+    )
+    assert p.name == "postgresql-13.md"
+    assert p.parent.name == "source"
+    # frontmatter 含 slug
+    meta = read_source_file(p)
+    assert meta["slug"] == "postgresql-13"
+    assert meta["source_id"] == "abc123def4560001"
+
+
+def test_write_source_wiki_page_slug_collision(tmp_path: Path):
+    """slug 重名 source page 加 -<short-hash> 后缀 (obsidian 兼容)."""
+    from corpus.storage import write_source_wiki_page, read_source_file
+    # 第一个 slug=postgresql
+    p1 = write_source_wiki_page(tmp_path, "id1", slug="postgresql",
+                                content_hash="abc123de", body="v1")
+    # 第二个同 slug, 不同 source_id + hash
+    p2 = write_source_wiki_page(tmp_path, "id2", slug="postgresql",
+                                content_hash="fed45678", body="v2")
+    assert p1.name == "postgresql.md"
+    assert p2.name == "postgresql-fed45678.md"
+    # 两个内容都保留
+    assert "v1" in p1.read_text()
+    assert "v2" in p2.read_text()

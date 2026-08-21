@@ -337,6 +337,10 @@ def sources_ingest(vault_path: Path, source_file: Path, force_revive: bool, as_j
             revive_on_deleted=force_revive,
         )
         # 写 raw/<file> frontmatter (source_id/content_hash/size_bytes/created_at)
+        # slug for obsidian-兼容 wiki 文件名 (wiki/source/<slug>.md)
+        from .ids import slugify
+        slug = slugify(canonical.stem or "source")
+
         # 替代 plain write_text, 让 raw/<file> 也是 source of truth (frontmatter 含 metadata)
         write_source_file(
             paths["root"],
@@ -347,12 +351,15 @@ def sources_ingest(vault_path: Path, source_file: Path, force_revive: bool, as_j
             size_bytes=result["size_bytes"],
             status="staged",
             body=content,
+            slug=slug,
         )
-        # 写 wiki/source/<source_id>.md (per-source wiki page, 'Concepts extracted' 段
-        # 现在为空, 等 concepts add-source 触发 update_source_page_concepts 后更新)
+        # 写 wiki/source/<slug>.md (obsidian 兼容, slug 重名时 pick_source_page_target
+        # 加 -<short-hash> 后缀; 'Concepts extracted' 段现在为空, 等 concepts add-source
+        # 触发 update_source_page_concepts 后更新)
         write_source_wiki_page(
             paths["root"],
             source_id=result["source_id"],
+            slug=slug,
             original_filename=canonical.name,
             content_hash=result["content_hash"],
             size_bytes=result["size_bytes"],

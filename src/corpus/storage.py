@@ -860,6 +860,24 @@ def _raw_path(vault_root: Path, source_id: str) -> Path:
     return None
 
 
+
+def pick_source_page_target(
+    wiki_source_dir: Path, slug: str, content_hash: str,
+) -> Path:
+    """source page 文件名 = slug (obsidian 兼容, 人类可读).
+
+    slug 重名时加 -<short-hash> 后缀 (8 hex, 16M 空间, 撞概率可忽略).
+    与 pick_raw_target 处理 raw/ 撞名一致 (那里用 -ingest-<UTC>_<4hex>).
+    例: postgresql.md (first) + postgresql-fed45678.md (2nd, hash 短版)
+    """
+    target = wiki_source_dir / f"{slug}.md"
+    if not target.exists():
+        return target
+    suffix = (content_hash or "x" * 8)[:8]
+    return wiki_source_dir / f"{slug}-{suffix}.md"
+
+
+
 def restore_from_files(vault_root: Path, *, dry_run: bool = False) -> dict[str, Any]:
     """从 git 仓库 (raw/ + wiki/concept/ + wiki/source/) 重建整个 DB.
 
@@ -1147,6 +1165,7 @@ def write_source_file(
     status: str = "staged",
     created_at: str | None = None,
     body: str = "",
+    slug: str | None = None,
 ) -> Path:
     """写 raw/<file> frontmatter (raw file 含 source metadata).
 
@@ -1201,14 +1220,15 @@ def write_source_wiki_page(
     vault_root: Path,
     source_id: str,
     *,
-    original_filename: str | None = None,
+    slug: str,
     content_hash: str | None = None,
+    original_filename: str | None = None,
     size_bytes: int | None = None,
     status: str = "staged",
     created_at: str | None = None,
     body: str = "",
 ) -> Path:
-    """写 wiki/source/<source_id>.md (per-source wiki 页).
+    """写 wiki/source/<slug>.md (per-source wiki 页, obsidian 兼容).
 
     frontmatter: source_id / original_filename / content_hash / size_bytes / status / created_at.
     body: 原始 markdown (用户提供) + '## Concepts extracted from this source' section (DB 反查填充).
@@ -1217,10 +1237,11 @@ def write_source_wiki_page(
     """
     pages_dir = vault_root / "wiki" / "source"
     pages_dir.mkdir(parents=True, exist_ok=True)
-    path = pages_dir / f"{source_id}.md"
+    path = pick_source_page_target(pages_dir, slug, content_hash or "")
     now = created_at or _utc_now_iso()
     meta = {
         "source_id": source_id,
+        "slug": slug,
         "type": "source",
     }
     if original_filename:
@@ -1238,15 +1259,27 @@ def write_source_wiki_page(
 
 
 def update_source_page_concepts(vault_root: Path, source_id: str) -> None:
-    """重写 wiki/source/<source_id>.md 的 '## Concepts extracted' section.
+    """重写 wiki/source/<slug>.md 的 '## Concepts extracted' section.
 
     从 DB 反查 extractions (source_id), 重新生成完整 file.
     调用场景: concepts add-source / remove-source / remove-extraction 改了 extractions 后.
+
+    按 source_id frontmatter 找 page 文件 (源页 path 实际是 <slug>.md 不是 <source_id>.md).
     """
-    path = vault_root / "wiki" / "source" / f"{source_id}.md"
-    if not path.exists():
+    pages_dir = vault_root / "wiki" / "source"
+    if not pages_dir.exists():
         return
-    meta, body = _read_md(path)
+    target = None
+    for p in pages_dir.iterdir():
+        if p.name == ".tmp" or p.name == ".gitkeep":
+            continue
+        meta, _body = _read_md(p)
+        if meta.get("source_id") == source_id:
+            target = p
+            break
+    if target is None:
+        return
+    meta, body = _read_md(target)
     section_marker = "\n## Concepts extracted from this source"
     if section_marker in body:
         original_body = body.split(section_marker)[0].rstrip()
@@ -1255,7 +1288,7 @@ def update_source_page_concepts(vault_root: Path, source_id: str) -> None:
     new_concepts_section = _build_concepts_extracted_section(
         vault_root, source_id, original_body,
     )
-    _write_md(path, meta=meta, body=new_concepts_section)
+    _write_md(target, meta=meta, body=new_concepts_section)
 
 
 def read_source_file(path: Path) -> dict[str, Any] | None:
