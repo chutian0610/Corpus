@@ -2024,12 +2024,14 @@ def list_concepts(
     is_orphan: bool | None = None,
     is_certified: bool | None = None,
     status: str | None = None,
+    tags: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """列 concept.
 
     is_orphan:    None=全部, True=仅孤儿, False=仅非孤儿
     is_certified: None=全部, True=仅已认证, False=仅未认证
     status:      None=全部, 'draft' / 'evergreen' / 'stale' 过滤 (schema v5)
+    tags:         list[str] | None — 多 tag 与 (JSON 数组包含所有) 取交集 (AND)
     """
     where_clauses: list[str] = []
     params: list[Any] = []
@@ -2044,6 +2046,13 @@ def list_concepts(
     if status is not None:
         where_clauses.append("status=?")
         params.append(status)
+    if tags:
+        # 每个 tag 必须存在于 JSON array (AND). SQL: json_each + ALL in subquery.
+        for tag in tags:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(tags) WHERE json_each.value = ?)"
+            )
+            params.append(tag)
     sql = "SELECT * FROM concepts"
     if where_clauses:
         sql += " WHERE " + " AND ".join(where_clauses)
