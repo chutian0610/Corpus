@@ -94,7 +94,7 @@ Returns JSON:
 ## Step 3 — Verify
 
 ```bash
-corpus vault info <vault_path> --json
+corpus vault inspect <vault_path> --json
 ```
 
 Expect:
@@ -123,7 +123,7 @@ Expect:
 ├── raw/                   # ingest 产物
 ├── wiki/
 │   ├── concept/           # corpus concepts write 生成的 wiki 页 (<slug>.md)
-│   └── index/             # opt-in: `corpus index sync <vault>` 手动生成 snapshot (默认不入 git)
+│   └── index/             # opt-in: `corpus index snapshot <vault>` 手动生成 snapshot (默认不入 git)
 └── .wiki-meta/
     └── corpus.db          # SQLite
 ```

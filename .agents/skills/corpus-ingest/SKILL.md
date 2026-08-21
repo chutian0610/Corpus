@@ -3,8 +3,8 @@ name: corpus-ingest
 description: >
   完整 ingest 工作流: source markdown → vault ingest → LLM 抽 concept → 
   dedup (find-by-link match_score) → concepts write/update (with CAS).
-  index sync 不再自动触发 (opt-in), 想给外部 web UI / dashboard 喂 snapshot
-  用 `corpus index sync <vault>` 手动跑.
+  index snapshot 不再自动触发 (opt-in), 想给外部 web UI / dashboard 喂 snapshot
+  用 `corpus index snapshot <vault>` 手动跑.
   Use this skill when the user has source content (markdown files, articles, notes, 
   design docs) to ingest into a corpus vault. 触发词: "入库 X", "抽 concept", 
   "build knowledge base", "把 N 个 markdown 入库", "process sources", 
@@ -12,17 +12,19 @@ description: >
   
   Covers the full pipeline:
     1. Pre-flight: vault 已 init (corpus-init skill), git 在 PATH
-    2. sources ingest / batch (raw_path 自动 <stem>-ingest-<UTC>.<ext>, 同时写 wiki/source/<slug>.md)
+    2. `corpus sources add <vault> <path>` (file/dir auto-detect; raw_path 自动 <stem>-ingest-<UTC>.<ext>,
+       同时写 wiki/source/<slug>.md; Stage 2 替代老的 sources ingest + sources batch)
     3. 对每个 source_id, Read raw/<file> 抽取概念
     4. corpus concepts find-by-link 查 dedup (match_score >= 0.9 → 已存在, 也匹配 aliases)
     5a. corpus concepts write (新, --status/--aliases/--tags 可选) — slug 撞抛 ConflictError
     5b. corpus concepts update (已有, --expected-version CAS 防 race) — 含 body / source_ids / status 合并
-    5c. corpus concepts add-source (只加新 source 到已有 concept, 不动 body)
-    5d. corpus concepts remove-source / remove-extraction (从已有 concept 删 source 或撤抽取)
-    6. (opt-in) corpus index sync (默认 vault.git 看不到这两个 JSON; 想要 snapshot 手动跑)
+    5c. `corpus concepts link <slug> --source SID --quote-span "..."` (fold of 老的 add-source; 默认 INSERT 新 extractions row)
+    5d. `corpus concepts unlink <slug> --source SID` (粗粒度: 删该 source 全部 extractions + source_ids 减)
+       `corpus concepts unlink <slug> --extraction-id X` (细粒度: 删单条 extractions)
+    6. (opt-in) `corpus index snapshot <vault>` (默认 vault.git 看不到这两个 JSON; 想给外部 web UI / dashboard 喂 snapshot 手动跑)
   
   Not for: vault setup (→ corpus-init), config (→ corpus-config), audit log (→ corpus skill), 
-  maintenance (→ corpus-maintain, 未来). Multi-agent 并发: write_concept 严格 INSERT (slug 撞抛 ConflictError), 
+  maintenance (→ corpus-maintain, 未来). 操作审计查询 → 主 corpus skill 的 `corpus history`. Multi-agent 并发: write_concept 严格 INSERT (slug 撞抛 ConflictError), 
   update_concept 支持 --expected-version CAS (race-safe).
 ---
 
@@ -40,7 +42,7 @@ description: >
 不适用:
 - 第一次建 vault → `corpus-init` skill
 - 改 corpus 配置 (是否 git / auto commit 等) → `corpus-config` skill (未来)
-- 查 audit log / 看操作历史 → 主 `corpus` skill 的 `corpus audit`
+- 操作审计查询 → 主 `corpus` skill 的 `corpus history`
 - 删除 concept / 清理 orphan → 主 `corpus` skill 的 `corpus delete` 等
 
 
@@ -80,17 +82,19 @@ corpus vault info <vault> --json
 # 失败 → 提示用 corpus-init skill
 ```
 
-## Step 1 — Sources ingest (vault 外 → raw/)
+## Step 1 — Sources add (vault 外 → raw/)
 
 ```bash
-# 单文件
-corpus sources ingest <vault> /path/to/note.md --json
-# 返回: {"action": "staged", "source_id": "abc123", "raw_path": ".../note-ingest-20260820-183000.md", "content_hash": "..."}
+# 单文件 — path 是文件
+corpus sources add <vault> /path/to/note.md --json
+# 返回: {"action": "staged", "source_id": "abc123", "raw_path": ".../note-ingest-...md", ...}
 
-# 批量 (整个目录)
-corpus sources batch <vault> /path/to/notes/ --glob "*.md" --json
-# 返回: {"total": N, "staged": M, "duplicates": K, "failed": 0, ...}
+# 批量 — path 是目录, auto-detect
+corpus sources add <vault> /path/to/notes/ --glob "*.md" --json
+# 返回: {"total": N, "staged": M, "revived": R, "duplicates": K, "failed": 0, "results": [...]}
 ```
+
+旧名 alias 仍能用 `sources ingest <file>` / `sources batch <dir>`, 1 release 后删.
 
 重要: source path **必须在 vault 外**. vault 内的文件 (含 raw/) 不能 ingest (避免重复).
 
@@ -257,31 +261,38 @@ corpus concepts update <vault> postgresql-mvcc \
 # → 回到 1 重新 read + merge
 ```
 
-**5c. 加新 source 到已有 concept (add-source, 不动 body)**:
+**5c. 链接 source → concept (concepts link)**:
 ```bash
-corpus concepts add-source <vault> postgresql-mvcc \
-  --source-id <new_sid> \
+# 默认 INSERT 新 extractions row (允许多 evidence per (concept, source))
+corpus concepts link <vault> postgresql-mvcc \
+  --source <new_sid> \
   --quote-span "xmin/xmax from PostgreSQL docs" \
   --prompt-version extract-v1 \
   --json
-# 自动: source_ids set union, is_orphan=0, 写 extractions 行
+
+# 若已有同一 (concept, source) 的 extractions row, 传 --extraction-id 复用 + UPDATE quote_span
+corpus concepts link <vault> postgresql-mvcc \
+  --source <new_sid> \
+  --quote-span "再次出现的 xmin/xmax 引用" \
+  --extraction-id e_existing_xxxxxxxxxxxx \
+  --json
+# 自动: source_ids set union, is_orphan=0
 # source page (wiki/source/<slug>.md) "## Concepts extracted" 段自动反查更新
-# raw/<file>.md frontmatter 也同步写新 source (via _sync_concept_file)
 ```
 
-**5d. 删 source / 撤抽取**:
-- `corpus concepts remove-source <vault> <slug> --source-id <sid>`: 从 concept.source_ids 移除 (自动 is_orphan=1, extractions 保留作 audit history)
-- `corpus concepts remove-extraction <vault> <extraction_id>`: 删单条 extractions 行 (细粒度)
+**5d. 解链 (concepts unlink)**:
+- `--source SID` 粗粒度: 删该 (concept, source) 全部 extractions + source_ids 减 + is_orphan 自动
+- `--extraction-id X` 细粒度: 删单条 extractions row + sync source_ids
 
 **multi-agent 并发同 slug race** (schema v5): write_concept 严格 INSERT 不静默 merge, 第二个等锁后 INSERT 撞 UNIQUE → ConflictError. LLM 重新走 find-by-link + read + merge + update_concept (--expected-version). 这是 read-modify-write 模式的典型应用, 业务决策归属 LLM.
 
 ## Step 5 — Index sync (自动)
 
-**没有自动 index sync 了.** `concepts write` / `update` / `delete` 不再自动写 `wiki/index/{concepts,sources}.json` (没人读, opt-in).
+**没有自动 index snapshot 了.** `concepts write` / `update` / `delete` 不再自动写 `wiki/index/{concepts,sources}.json` (没人读, opt-in). 想要 snapshot (e.g. 给 web UI 喂数据) 手动跑:
 default `.gitignore` 含 `wiki/index/*.json`. 想要 snapshot (e.g. 给 web UI 喂数据) 手动跑:
 
 ```bash
-corpus index sync <vault> --json
+corpus index snapshot <vault> --json
 ```
 
 ## Multi-agent 并发要点 (schema v5)
@@ -295,7 +306,7 @@ corpus index sync <vault> --json
 
 ## Source page 同步 (双向)
 
-`corpus sources ingest` / `batch` 自动写 `wiki/source/<slug>.md` (obsidian 兼容).
+`corpus sources add <vault> <path>` 自动写 `wiki/source/<slug>.md` (obsidian 兼容).
 slug = `slugify(canonical.stem)` (canonical 是 ingest 时的源文件路径). 重名时 pick_source_page_target 加 `-<short-hash>` 后缀.
 
 `wiki/source/<slug>.md` frontmatter 包含:
@@ -303,7 +314,7 @@ slug = `slugify(canonical.stem)` (canonical 是 ingest 时的源文件路径). �
 - `slug` (易读别名, 跨 vault wikilink 引用)
 - `content_hash` / `size_bytes` / `status` / `created_at`  (raw/<file>.md 的 basename 即原始名, schema v6 起了无 original_filename 列)
 
-`corpus concepts add-source / remove-source / remove-extraction` 反向触发 `update_source_page_concepts`:
+`corpus concepts link / unlink` 反向触发 `update_source_page_concepts`:
 重写 source page 的 `## Concepts extracted from this source` 段 (从 DB extractions 表反查).
 
 ## Vault 完整 self-contained (跨电脑恢复)
@@ -312,19 +323,19 @@ slug = `slugify(canonical.stem)` (canonical 是 ingest 时的源文件路径). �
 # 换电脑 / DB 损坏时:
 git clone <vault-repo> ~/my-vault
 cd ~/my-vault
-corpus restore-from-files .            # 从 raw/ + wiki/concept/ + wiki/source/ 重建整个 DB
+corpus rebuild .                       # 从 raw/ + wiki/concept/ + wiki/source/ 重建整个 DB
 ```
 
-`corpus restore-from-files` 读所有 markdown frontmatter (含 source_id / content_hash / status / aliases / tags) 重建 sources / concepts / extractions / links 表. wiki/concept/<slug>.md (含 frontmatter sources / links / certified) 也恢复.
+`corpus rebuild` 读所有 markdown frontmatter (含 source_id / content_hash / status / aliases / tags) 重建 sources / concepts / extractions / links 表. wiki/concept/<slug>.md (含 frontmatter sources / links / certified) 也恢复.
 
 vault 完全 self-contained: `git` 是 source of truth, `.wiki-meta/corpus.db` 是 query cache, restore 重建.
 
 ## 完整例子: batch ingest 一个目录
 
 ```bash
-# 1. ingest 整个目录
-corpus sources batch ~/my-wiki /path/to/articles/ --glob "*.md" --json
-# → 8 sources staged
+# 1. ingest 整个目录 (path 自动 detect file/dir)
+corpus sources add ~/my-wiki /path/to/articles/ --glob "*.md" --json
+# → 8 sources staged (results[] 含 per-file outcome: staged / duplicate / revived / failed)
 
 # 2. 列 source_ids
 for sid in $(corpus sources list ~/my-wiki --json | jq -r '.[].source_id'); do
@@ -358,7 +369,7 @@ done
 
 # 6. 验收
 corpus stats ~/my-wiki --json
-corpus audit ~/my-wiki --op stage --limit 20
+corpus history ~/my-wiki --op stage --limit 20
 ```
 
 ## Next steps
@@ -371,8 +382,8 @@ Ingest 跑完之后, **不要再列 `corpus` 命令让 agent 自己跑** — 该
 | 健康检查 / orphan / 重复 / staleness / 修 concept | **`corpus-maintain`** (未来 skill, AGENTS.md 已预定) |
 | 认证 / 评分 (certify) | 主 `corpus` skill (`## CLI 速查` 段) |
 | 调 vault config (auto_git / auto_commit 等) | **`corpus-config`** (未来 skill, AGENTS.md 已预定) |
-| 跨电脑 restore (`corpus restore-from-files`) | 主 `corpus` skill (`## CLI 速查` 段) |
-| 翻 ingest_log (audit) | `corpus audit` (command-level) |
+| 跨电脑 restore (`corpus rebuild`) | 主 `corpus` skill (`## CLI 速查` 段) |
+| 翻 ingest_log (history) | `corpus history` (command-level) |
 
 > 命令速查只在主 `corpus` skill 维护一份 — ingest / init / maintain 都引那边,
 > 别在每个子 skill 里复制一遍命令表. 这是 single source of truth 原则.
@@ -381,7 +392,7 @@ Ingest 跑完之后, **不要再列 `corpus` 命令让 agent 自己跑** — 该
 ## Out of scope
 
 - vault 初始化 → `corpus-init` skill
-- corpus 配置 (是否 git / auto commit 等) → `corpus-config` skill (未来)
-- audit log 查询 → 主 `corpus` skill 的 `corpus audit`
+- corpus 配置 (auto_git / auto_commit 等, future) → `corpus-config` skill (未来)
+- 操作审计查询 → 主 `corpus` skill 的 `corpus history`
 - 维护 (delete concept / 修 orphan / staleness) → `corpus-maintain` skill (未来)
 - 认证 / 评分 (certify) → 主 `corpus` skill (在 source 全部 ingest 完后, agent 自己做评分, 不在 ingest 工作流)

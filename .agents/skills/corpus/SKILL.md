@@ -103,37 +103,59 @@ for it in items:
 - ❌ 不维护 in-memory 状态（每次调用都是独立 SQLite 操作）
 - ❌ 不主动重试 / repair / judge（失败立即返回给 agent）
 
-## CLI 速查
+## CLI 速查 (Stage 2 ingest 简化后, 27 → 19 命令)
 
+> 旧命令 (列在下面 `[deprecated]` 段) 走 alias 转发到新命令, 1 个 release 后删除. 写新 agent workflow **请用新名字**.
+
+### vault
 | 命令 | 作用 |
 |---|---|
-| `vault init <path>` | 创建 vault 目录 + 初始化 SQLite |
-| `vault info <path>` | vault 路径表 + 元信息 |
-| `vault stats <path>` / `stats <path>` | source/concept 统计 + 认证覆盖率 |
-| `sources ingest <vault> <file>` | 单文件入库 (vault **外**文件, content-hash dedup + `-ingest-<ts>` 后缀) |
-| (上一行的反例) | `sources ingest <vault> <vault>/raw/X.md` → 报 `path is inside vault raw/` (不重复 ingest) |
-| `sources ingest ... --force-revive` | 同 hash 已 soft-deleted → 复活该 source_id |
-| `concepts write <vault> ...` | 写 concept (必传 --extractions, 每个 source 一段 quote_span) |
-| `concepts update <vault> <slug> --body ... --add-extractions ...` | 增量更新 (改 title/body + 加 extraction/link) |
-| `concepts update <vault> <slug> --expected-version N ...` | CAS 模式: 只在 concept 当前 version=N 时 update, 否则 OptimisticLockError. **multi-agent 推荐必传**. |
-| `concepts delete <vault> <slug>` | 删 concept (默认 dry-run, --no-dry-run 真删, 同步清 wiki 文件) |
-| `concepts list ... --orphans` / `--certified` / `--uncertified` | 过滤 (--certified 与 --uncertified 互斥) |
-| `concepts remove-extraction <vault> <extraction_id>` | 细粒度撤一次抽取 (自动 sync concept.source_ids / is_orphan) |
-| `concepts find-by-link ...` | 返回含 `match_score` 字段 (1.0 exact / 0.9 startswith / 0.5 contains / 0.4 title), 按 score DESC 排 |
-| `concepts certify ... --score X --issues "..."` | 首次认证必传 `--score`; 后续 partial 可省 (score/issues/suggestions 都 None=保留); 传 `""` 清空 list; 全 None 报 `no fields to update` |
-| `sources batch <vault> <dir> [--glob]` | 批量入库 |
-| `sources list <vault> [--status]` | 列源 |
-| `sources show <vault> <source_id>` | 看源元数据 |
-| `sources commit <vault> <source_id>` | 标记 committed |
-| `concepts write <vault> --slug X --title Y --body Z --source-ids ... --links ...` | 写 wiki |
-| `concepts show <vault> <slug>` | 读 wiki |
-| `concepts list <vault>` | 列 wiki |
-| `concepts search <vault> <query>` | 搜索（stage 1 是 LIKE，stage 3 是 FTS5）|
-| `concepts find-by-link <vault> <link>` | wikilink 解析 → 候选 concept |
-| `concepts uncertified <vault>` | 待认证 list |
-| `concepts certify <vault> <slug> --score X --issues ... --suggestions ...` | 标记已认证 |
+| `vault init <vault>` | 创建 vault 目录 + 初始化 SQLite (.gitignore + initial commit) |
+| `vault inspect <vault>` | vault 健康度 + 内容统计: db_initialized / schema_version / concepts (total, certified, uncertified, orphans, avg_score, score_distribution) / sources (total, by_status) |
+
+### sources
+| 命令 | 作用 |
+|---|---|
+| `sources add <vault> <path>` | path 是文件 → 单文件 ingest; path 是目录 → 按 `--glob` (默认 *.md) batch. 撞 active hash → ConflictError; deleted + `--force-revive` → 复活 source_id |
+| `sources list <vault>` | 列 source, `--status` 过滤 staged/committed/deleted |
+| `sources show <vault> <sid>` | 源元数据 + raw_path |
+| `sources delete <vault> <sid>` | 软删 (status=deleted; `--hard` 物理删; `--reason` 存 audit) |
+| `sources mark-state <vault> <sid> --status staged\|committed\|deleted` | 通用化状态切换. committed 设 committed_at, deleted 设 deleted_at, re-staging 清两个时间 |
+
+### concepts
+| 命令 | 作用 |
+|---|---|
+| `concepts write <vault> --slug X --title Y --body-file body.md --extractions-file extr.json [--aliases] [--tags] [--status] [--prompt-version]` | 写 concept. body+extractions 强制走临时文件 (避 shell 转义) |
+| `concepts update <vault> <slug> [--body-file] [--add-extractions-file] [--status] [--aliases] [--tags] [--expected-version N]` | 增量更新. `--expected-version N` = CAS (multi-agent 推荐必传) |
+| `concepts link <vault> <slug> --source SID --quote-span "..." [--extraction-id X]` | 链接 source → concept. 默认 INSERT 新 extractions row; 传 `--extraction-id X` 复用现有 row (UPDATE quote_span) |
+| `concepts unlink <vault> <slug> --source SID / --extraction-id X` | 解链. `--source` 粗粒度 (删该 source 全部 extractions + source_ids 减); `--extraction-id` 细粒度 (单条 row) |
+| `concepts show <vault> <slug> [--source SID]` | 读 concept frontmatter + body. `--source` filter 退化成 evidence 视图 |
+| `concepts list <vault> [--orphans / --certified / --uncertified] [--status] [--tag X [--tag Y ...]]` | 过滤. `--certified`/`--uncertified` 互斥; 其他叠加 |
+| `concepts delete <vault> <slug>` | 默认 dry-run, `--no-dry-run` 真删 (同步清 wiki/concept/<slug>.md) |
+| `concepts certify <vault> <slug> --score X [--issues a,b] [--suggestions c,d] [--by agent]` | 首次必传 `--score`; 后续 partial 用 None=保留 / `""`=清空 |
+| `concepts find-by-link <vault> <link>` | wikilink → candidate list, 按 match_score DESC |
+| `concepts search <vault> <query>` | LIKE 搜索 (stage 3 会升 FTS5) |
 | `concepts unmark <vault> <slug>` | 撤销认证 |
-| `concepts evidence <vault> <slug> [--source-id SID]` | 查抽取证据 (quote_span + agent + prompt + time) |
-| `concepts add-source <vault> <slug> --source-id SID --quote-span "..."` | 给 concept 加一个 source (自动写 extractions + 清 is_orphan) |
-| `concepts remove-source <vault> <slug> --source-id SID` | 从 concept 移除一个 source (自动 is_orphan 同步) |
-| `index sync <vault>` | opt-in 导出 wiki/index/concepts.json + sources.json (想要 snapshot 手动跑; 已不再被 write/update/delete 自动触发) |
+
+### top-level (cross-cutting)
+| 命令 | 作用 |
+|---|---|
+| `corpus history <vault>` | 操作审计 (ingest_log 表). `--op` / `--source-id` / `--since` / `--limit` filter |
+| `corpus rebuild <vault>` | 从文件系统重建整个 DB (换电脑 / DB 损坏时用). `--dry-run` 默认 |
+| `corpus index snapshot <vault>` | opt-in 写 `wiki/index/{concepts,sources}.json` 给外部消费者 |
+
+### Deprecated aliases (旧名字可继续用, 1 release 后删)
+| 旧命令 | 当前等价 |
+|---|---|
+| `vault info` / `vault stats` | `vault inspect` |
+| `sources ingest <vault> <file>` | `sources add <vault> <file>` |
+| `sources batch <vault> <dir>` | `sources add <vault> <dir>` |
+| `sources commit <sid>` | `sources mark-state --status committed` |
+| `concepts add-source` | `concepts link` |
+| `concepts remove-source` | `concepts unlink --source SID` |
+| `concepts remove-extraction` | `concepts unlink --extraction-id X` |
+| `concepts evidence` | `concepts show <slug> --source SID` |
+| `corpus audit` | `corpus history` |
+| `corpus restore-from-files` | `corpus rebuild` |
+| `corpus index sync` | `corpus index snapshot` |
+

@@ -25,43 +25,71 @@ LLM-driven wiki builder, **CLI-first + LLM-decoupled**。Python ≥3.11，依赖
 
 ## 常用命令
 
-完整 CLI 参考见 `.agents/skills/corpus-bot/SKILL.md`，以下是核心 5 个：
+完整 CLI 参考见 `.agents/skills/corpus/SKILL.md` 的 `## CLI 速查` 段 (Stage 2 ingest 简化后 19 命令).
+下面是 7 步 ingest 工作流的核心命令:
 
 ```bash
-# 初始化
-corpus vault init <path>
+# 0. vault 健康度 (DB schema + 内容统计)
+corpus vault inspect <vault> --json
+# → {db_initialized, schema_version, concepts{total, certified, uncertified, orphans, avg_score, ...}, sources{...}}
 
-# 落源
-corpus sources ingest <vault> <file>
-corpus sources batch <vault> <dir> --glob "*.md"
+# 1. 把 vault 外文件拉进来. path 是文件 → 单文件; path 是目录 → batch (按 --glob)
+corpus sources add <vault> <path> --glob "*.md" --json
+# → 单文件: {action: staged|revived, source_id, raw_path, ...}
+# → 批量: {total, staged, duplicates, revived, failed, results[...]}
 
-# 写 / 查 concept（agent 自己用 LLM 生成 body + **必传 quote_span**）
+# 2. 列 source 检视
+corpus sources list <vault> --json
+corpus sources show <vault> <sid> --json
+
+# 3. 读 source 内容 (LLM 端自己用 Read 工具读 raw/<file>-ingest-<UTC>.md, 无 corpus 命令)
+
+# 4. dedup check
+corpus concepts find <vault> --by-link <slug> --json
+
+# 5a. 写新 concept (body + extractions 强制走临时文件, 避 shell 转义)
 corpus concepts write <vault> --slug X --title Y \
-    --body "..." --extractions '[{"source_id":"SID","quote_span":"原文片段..."}]' \
-    --prompt-version extract-v1
-corpus concepts show <vault> <slug>
-corpus concepts search <vault> <query>
-corpus concepts evidence <vault> <slug>  # 查抽取证据
+    --body-file .tmp/x.md --extractions-file .tmp/x-extr.json \
+    --aliases "a,b" --tags "t1,t2" --status evergreen --prompt-version extract-v1 --json
 
-# LLM 抽 concept 时推荐走 **临时文件**, 避免在 shell 里转义多行 markdown / JSON:
-corpus concepts write <vault> --slug X --title Y \
-    --body-file .tmp/concept-X.md \
-    --extractions-file .tmp/concept-X-extr.json \
-    --prompt-version extract-v1
-# --body / --body-file 互斥; --extractions / --extractions-file 互斥
-# (concepts update 同理: --body-file / --add-extractions-file)
-# 文件上限 1 MiB; 文件路径不存在 → click.Path 自动 exit 2
+# 5b. 更新已有 concept (CAS 防 race)
+corpus concepts update <vault> <slug> --body-file .tmp/x.md \
+    --add-extractions-file .tmp/extr.json --status evergreen \
+    --expected-version <current-version> --json
 
-# 维护 vault
-corpus sources delete <vault> <sid>     # 默认 dry-run，看 orphan 影响
-corpus concepts list <vault> --orphans    # 看无源 concept
-corpus concepts add-source <vault> <slug> --source-id SID --quote-span "..."
-corpus index sync <vault>               # 导出 wiki/index/*.json
+# 5c. 链接 source 到概念 (允许多 evidence per (concept, source), --extraction-id 可复用现有 row)
+corpus concepts link <vault> <slug> --source SID --quote-span "..." [--extraction-id X] --json
 
-# 质检
-corpus concepts uncertified <vault>
-corpus concepts certify <vault> <slug> --score 0.85 --issues ... --suggestions ...
-corpus stats <vault>
+# 5d. 解链 (粗粒度 --source SID 删该 source 全部 + sync source_ids; 细粒度 --extraction-id X 删单条)
+corpus concepts unlink <vault> <slug> (--source SID | --extraction-id X) --json
+
+# 6. 看写得对不对
+corpus concepts show <vault> <slug> [--source SID] --json
+
+# (opt) 标质量
+corpus concepts certify <vault> <slug> --score 0.85 [--issues ...] [--suggestions ...] --json
+```
+
+旁路操作:
+
+```bash
+corpus sources mark-state <vault> <sid> --status staged|committed|deleted   # 通用化状态切换 (替代老 sources commit)
+corpus sources delete <vault> <sid>                                       # 软删
+corpus concepts list <vault> [--orphans|--certified|--uncertified] [--tag X] # 过滤
+corpus concepts delete <vault> <slug>                                    # 默认 dry-run, --no-dry-run 真删
+corpus history <vault> [--op stage|...] [--since YYYY-MM-DD] [--limit]      # 操作审计 (替代老 corpus audit)
+corpus rebuild <vault> [--dry-run]                                       # filesystem → DB 重建 (替代老 restore-from-files)
+corpus index snapshot <vault>                                            # 写 wiki/index/{concepts,sources}.json (替代老 index sync)
+```
+
+deprecated alias (旧名字仍可用, ctx.invoke 转发, 1 release 后删):
+
+```bash
+corpus sources ingest / batch / commit          → sources add / sources add / sources mark-state --status committed
+corpus vault info / stats                        → vault inspect
+corpus audit / restore-from-files / index sync   → history / rebuild / index snapshot
+corpus concepts add-source / remove-source / remove-extraction / evidence  
+                                              → concepts link / unlink --source / unlink --extraction-id / show --source
 ```
 
 ## 跑测试
@@ -144,7 +172,7 @@ uv tool install -e .   # editable, 改了 src/ 立即生效
   - `certify` / `unmark` 无条件 sync (score / issues / suggestions 必更新)
   - `wiki/source/<slug>.md` 是 extraction manifest (只有 `## Concepts extracted from this source` 段), **不复制原文**. single source of truth 永远是 `raw/<file>.md` (git 跟踪, 含原文 + frontmatter). 想读原文打开 raw/, 想看 source ↔ concepts 关系看 wiki/source.
   - 历史 bug 残留: 之前版本 `update_source_page_concepts` 可能把原文写进 wiki/source, 现在每次 sync 都按 single-source-of-truth 回归——自动清掉多余 body, frontmatter 保留.
-- **`export_index` (opt-in)** — `corpus index sync <vault>` 手动生成 `wiki/index/concepts.json` + `sources.json`. 不再被 concepts write/update/delete 自动触发 (没人读, 自动写是噪音). 想要 snapshot 给外部 web UI / dashboard 用时手动跑. 默认 `.gitignore` 已加 `wiki/index/*.json` 防止误 commit snapshot.
+- **`export_index` (opt-in)** — `corpus index snapshot <vault>` 手动生成 `wiki/index/concepts.json` + `sources.json`. 不再被 concepts write/update/delete 自动触发 (没人读, 自动写是噪音). 想要 snapshot 给外部 web UI / dashboard 用时手动跑. 默认 `.gitignore` 已加 `wiki/index/*.json` 防止误 commit snapshot.
 
 **Schema 版本**：不要 hardcode 数字(version 变化时文档失修). 运行时查法:
 
@@ -169,7 +197,7 @@ sqlite3 <vault>/.wiki-meta/corpus.db 'SELECT value FROM schema_meta WHERE key="s
 
 - **`corpus`** (主入口): 路由表 + 跨 skill 共享概念 (CAS / dedup / 错误) + CLI 速查
 - **`corpus-init`**: vault setup + install 验证 + 强制 git 命令检查
-- **`corpus-ingest`**: 完整 ingest 工作流 (source → LLM 抽 concept → dedup → write/update → index sync), 含 multi-agent 并发要点
+- **`corpus-ingest`**: 完整 ingest 工作流 (source → LLM 抽 concept → dedup → write/update → index snapshot), 含 multi-agent 并发要点
 - (未来) `corpus-config`: 改 vault 配置 (auto_git / auto_commit 等)
 - (未来) `corpus-maintain`: 健康检查 (orphan / staleness / duplicates)
 
