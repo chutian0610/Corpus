@@ -16,7 +16,7 @@ from pathlib import Path
 import click
 
 from . import __version__
-from .errors import CorpusBotError
+from .errors import ConflictError, CorpusBotError, StorageError, ValidationError
 from .ids import source_id_from_content
 from .storage import (
     SCHEMA_VERSION,
@@ -48,6 +48,7 @@ from .storage import (
     remove_source_from_concept,
     search_concepts,
     soft_delete_source,
+    hard_delete_source,
     stage_source,
     unmark_certified,
     update_concept,
@@ -167,6 +168,95 @@ def _read_file(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return path.read_text(encoding="latin-1")
+
+
+def _ingest_one_source(
+    paths: dict,
+    source_file: Path,
+    *,
+    force_revive: bool = False,
+) -> dict:
+    """ingest 一个 source 到 vault (validate → stage DB → write raw frontmatter → write source page).
+
+    Bug 2 修复: 写文件失败时回滚 DB (delete_source) — 之前 sources_ingest 失败
+    raw write 但 DB 留 source_id 造成状态不一致.
+
+    Returns: stage_source result dict (含 source_id / raw_path / size_bytes / content_hash / revived).
+    Raises: CorpusBotError (ValidationError / ConflictError / StorageError) on 校验/写失败.
+      - sources_ingest: 直接 propagate (click exit 1)
+      - sources_batch:  catch + 累积 failed results
+    """
+    # 1. validate (Rule 1-5)
+    canonical = validate_source_path_basic(source_file, paths["root"])
+
+    # 2. 不允许 ingest vault 内的任何文件
+    assert_source_outside_vault(canonical, paths["root"], paths["raw"])
+
+    # 3. read content + 算 raw_path
+    content = _read_file(canonical)
+    raw_path = pick_raw_target(paths["raw"], content, canonical.name)
+
+    # 4. stage DB
+    result = stage_source(
+        paths["corpus_db"],
+        raw_path=raw_path,
+        content=content,
+        original_filename=canonical.name,
+        revive_on_deleted=force_revive,
+    )
+
+    # 5. slug for obsidian 兼容 wiki 文件名
+    from .ids import slugify
+    slug = slugify(canonical.stem or "source")
+
+    # 6. 写 raw/<file> frontmatter (Bug 2: 失败回滚 DB)
+    try:
+        write_source_file(
+            paths["root"],
+            raw_path,
+            source_id=result["source_id"],
+            original_filename=canonical.name,
+            content_hash=result["content_hash"],
+            size_bytes=result["size_bytes"],
+            status="staged",
+            body=content,
+            slug=slug,
+        )
+    except OSError as e:
+        from .storage import hard_delete_source as delete_source
+        try:
+            delete_source(paths["corpus_db"], result["source_id"])
+        except Exception:
+            pass
+        raise StorageError(
+            f"failed to write raw file {raw_path}: {e}",
+            hint="DB rolled back via delete_source; 重新 ingest 重试",
+        ) from e
+
+    # 7. 写 wiki/source/<slug>.md (Bug 2: 失败回滚 DB)
+    try:
+        write_source_wiki_page(
+            paths["root"],
+            source_id=result["source_id"],
+            slug=slug,
+            original_filename=canonical.name,
+            content_hash=result["content_hash"],
+            size_bytes=result["size_bytes"],
+            status="staged",
+            body=content,
+        )
+    except OSError as e:
+        from .storage import hard_delete_source as delete_source
+        try:
+            delete_source(paths["corpus_db"], result["source_id"])
+        except Exception:
+            pass
+        raise StorageError(
+            f"failed to write source page for source_id={result["source_id"]}: {e}",
+            hint="DB rolled back; raw/<file> 保留但未与 DB 关联 (可手动 sources delete 或重新 ingest)",
+        ) from e
+
+    return result
 
 
 # ---------- top-level group ----------
@@ -324,61 +414,22 @@ def sources_ingest(vault_path: Path, source_file: Path, force_revive: bool, as_j
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
 
-    content = _read_file(canonical)
-    # 撞名检测: 同名但 sid 不同 -> 自动改名 <stem>-ingest-<UTC><ext>
-    raw_path = pick_raw_target(paths["raw"], content, canonical.name)
-
     try:
-        result = stage_source(
-            paths["corpus_db"],
-            raw_path=raw_path,
-            content=content,
-            original_filename=canonical.name,
-            revive_on_deleted=force_revive,
-        )
-        # 写 raw/<file> frontmatter (source_id/content_hash/size_bytes/created_at)
-        # slug for obsidian-兼容 wiki 文件名 (wiki/source/<slug>.md)
-        from .ids import slugify
-        slug = slugify(canonical.stem or "source")
-
-        # 替代 plain write_text, 让 raw/<file> 也是 source of truth (frontmatter 含 metadata)
-        write_source_file(
-            paths["root"],
-            raw_path,
-            source_id=result["source_id"],
-            original_filename=canonical.name,
-            content_hash=result["content_hash"],
-            size_bytes=result["size_bytes"],
-            status="staged",
-            body=content,
-            slug=slug,
-        )
-        # 写 wiki/source/<slug>.md (obsidian 兼容, slug 重名时 pick_source_page_target
-        # 加 -<short-hash> 后缀; 'Concepts extracted' 段现在为空, 等 concepts add-source
-        # 触发 update_source_page_concepts 后更新)
-        write_source_wiki_page(
-            paths["root"],
-            source_id=result["source_id"],
-            slug=slug,
-            original_filename=canonical.name,
-            content_hash=result["content_hash"],
-            size_bytes=result["size_bytes"],
-            status="staged",
-            body=content,
-        )
-        action = "revived" if result.get("revived") else "staged"
-        _emit(
-            {
-                "action": action,
-                "source_id": result["source_id"],
-                "raw_path": str(raw_path),
-                "size_bytes": result["size_bytes"],
-                "content_hash": result["content_hash"],
-            },
-            as_json=as_json,
-        )
-    except Exception as e:
+        result = _ingest_one_source(paths, source_file, force_revive=force_revive)
+    except CorpusBotError as e:
         _err(str(e), hint=getattr(e, "hint", None))
+        return
+    action = "revived" if result.get("revived") else "staged"
+    _emit(
+        {
+            "action": action,
+            "source_id": result["source_id"],
+            "raw_path": str(result["raw_path"]),
+            "size_bytes": result["size_bytes"],
+            "content_hash": result["content_hash"],
+        },
+        as_json=as_json,
+    )
 
 
 @sources.command(name="batch")
@@ -409,28 +460,24 @@ def sources_batch(
     results = []
     n_staged = n_dup = n_revived = n_fail = 0
     for src in matches:
+        # 撞名检测: 跟 _ingest_one_source 内部 pick_raw_target 一致
+        # 但 batch 要先 read content 算 sid (dedup 检查)
         try:
             content = _read_file(src)
-            sid = source_id_from_content(content)
-            # 撞名检测: 同名但 sid 不同 -> 自动改名
-            target = pick_raw_target(paths["raw"], content, src.name)
-
-            existing = read_source(paths["corpus_db"], sid)
-            if existing and existing["status"] != "deleted":
-                # 已 active (staged/committed) -> 跳过
-                results.append({"source": str(src), "action": "duplicate", "existing_id": existing["source_id"]})
-                n_dup += 1
-                continue
-            # deleted -> 让 stage_source 决定 (revive 或报错)
-
-            result = stage_source(
-                paths["corpus_db"],
-                raw_path=target,
-                content=content,
-                original_filename=src.name,
-                revive_on_deleted=force_revive,
-            )
-            target.write_text(content, encoding="utf-8")
+        except Exception as e:
+            results.append({"source": str(src), "action": "failed", "message": str(e)})
+            n_fail += 1
+            continue
+        sid = source_id_from_content(content)
+        # dedup: 同 sid 已 active -> 跳过 (避免调 _ingest_one_source 内 stage_source 撞 UNIQUE)
+        existing = read_source(paths["corpus_db"], sid)
+        if existing and existing["status"] != "deleted":
+            results.append({"source": str(src), "action": "duplicate", "existing_id": existing["source_id"]})
+            n_dup += 1
+            continue
+        # deleted -> 让 _ingest_one_source 决定 (revive 或报错)
+        try:
+            result = _ingest_one_source(paths, src, force_revive=force_revive)
             if result.get("revived"):
                 results.append({"source": str(src), "action": "revived", "source_id": result["source_id"]})
                 n_revived += 1
@@ -441,6 +488,8 @@ def sources_batch(
             results.append({"source": str(src), "action": "failed", "rule": e.rule, "message": e.message})
             n_fail += 1
         except CorpusBotError as e:
+            # _ingest_one_source 已 _err 退出 (不返), 但 batch 用 results.append 累积
+            # 实际上 _err 调 sys.exit, 不会返这里
             results.append({"source": str(src), "action": "failed", "message": str(e), "hint": getattr(e, "hint", None)})
             n_fail += 1
 

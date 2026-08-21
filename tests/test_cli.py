@@ -52,8 +52,8 @@ def test_batch_handles_already_ingested_source(vault: Path, external: Path):
     ])
     assert res.exit_code == 0
 
-    # 步骤 2: batch 一个含同 v1 的目录 + 一个新文件 v2
-    src_dir = vault / "incoming"
+    # 步骤 2: batch 一个含同 v1 的目录 + 一个新文件 v2 (src_dir 必须在 vault 外, 同 ingest 校验)
+    src_dir = external / "incoming2"
     src_dir.mkdir()
     (src_dir / "note.md").write_text("# version 1\n", encoding="utf-8")  # 同 v1
     (src_dir / "other.md").write_text("# version 2\n", encoding="utf-8")  # 新
@@ -154,7 +154,7 @@ def test_ingest_revive_then_relist_as_staged(vault: Path, external: Path):
 
 # ---------- sources batch --force-revive + 撞名 ----------
 
-def test_batch_renames_and_counts_revived(vault: Path):
+def test_batch_renames_and_counts_revived(vault: Path, external: Path):
     """batch: 撞名改名 + 复活 计数都正确."""
     from corpus.storage import soft_delete_source, read_source, stage_source
 
@@ -170,8 +170,8 @@ def test_batch_renames_and_counts_revived(vault: Path):
     soft_delete_source(db, ghost_sid)
 
     # batch 目录: 同名碰撞 + ghost 复活
-    src_dir = vault / "incoming"
-    src_dir.mkdir()
+    # batch 现在也走 outside-vault check: src_dir 必须在 vault 外
+    src_dir = external
     (src_dir / "note.md").write_text("# note v1\n", encoding="utf-8")
     (src_dir / "ghost.md").write_text("ghost content", encoding="utf-8")
     # 注意: batch 现在每个文件都生成 -ingest-<ts> 后缀, 无需撞名检测
@@ -191,7 +191,7 @@ def test_batch_renames_and_counts_revived(vault: Path):
     assert row["status"] == "staged"
 
 
-def test_batch_without_revive_flags_deleted_as_failed(vault: Path):
+def test_batch_without_revive_flags_deleted_as_failed(vault: Path, external: Path):
     """batch 不带 --force-revive, 同 hash 已 deleted → failed, 给出 hint."""
     from corpus.storage import soft_delete_source, stage_source
 
@@ -203,8 +203,7 @@ def test_batch_without_revive_flags_deleted_as_failed(vault: Path):
     )
     soft_delete_source(db, res["source_id"])
 
-    src_dir = vault / "incoming"
-    src_dir.mkdir()
+    src_dir = external
     (src_dir / "z.md").write_text("z content", encoding="utf-8")
 
     res = r.invoke(cli, [
@@ -606,3 +605,87 @@ def test_ingest_accepts_external_absolute_path(vault: Path, tmp_path: Path):
     # raw_path 应在 vault/raw/
     assert str(vault / "raw") in parsed["raw_path"]
     assert parsed["raw_path"].endswith(".md")
+
+
+# ---------- Bug 1: sources_batch 写 frontmatter + wiki source page ----------
+
+def test_sources_batch_writes_frontmatter_and_wiki_page(vault: Path, external: Path, tmp_path: Path):
+    """Bug 1 修复: sources_batch 现在跟 sources_ingest 一样:
+      1. 写 raw/<file> frontmatter (含 source_id / content_hash / slug 等)
+      2. 写 wiki/source/<slug>.md (obsidian 兼容)
+
+    之前 batch 用 plain target.write_text, 没 frontmatter, 也没 wiki/source page.
+    """
+    # 准备 batch 目录 (vault 外)
+    src_dir = external / "batch_articles"
+    src_dir.mkdir()
+    (src_dir / "postgresql-mvcc.md").write_text("# MVCC content", encoding="utf-8")
+    (src_dir / "wal.md").write_text("# WAL content", encoding="utf-8")
+
+    # batch ingest
+    res = _runner().invoke(cli, [
+        "sources", "batch", str(vault), str(src_dir), "--glob", "*.md", "--json",
+    ])
+    assert res.exit_code == 0, res.stderr
+    parsed = json.loads(res.output)
+    assert parsed["staged"] == 2
+
+    # 1. raw/<file> 应该有 frontmatter (有 --- 开头)
+    raw_files = [p for p in (vault / "raw").iterdir() if p.name not in (".tmp", ".gitkeep")]
+    assert len(raw_files) == 2
+    for f in raw_files:
+        content = f.read_text(encoding="utf-8")
+        assert content.startswith("---"), f"{f.name} 应该有 frontmatter"
+        assert "source_id:" in content
+        assert "content_hash:" in content
+        assert "original_filename:" in content
+
+    # 2. wiki/source/<slug>.md 存在 (obsidian 兼容)
+    src_pages = [p for p in (vault / "wiki" / "source").iterdir() if p.name != ".tmp"]
+    assert len(src_pages) == 2
+    for p in src_pages:
+        assert p.suffix == ".md"
+        # slug 文件名, 不是 source_id 16 hex
+        assert not p.stem[0].isdigit() or p.stem.isdigit() and len(p.stem) <= 8
+        content = p.read_text(encoding="utf-8")
+        assert content.startswith("---")
+        # frontmatter 含 slug
+        assert "slug:" in content
+        assert "source_id:" in content
+        # body 段: 原始 content + '## Concepts extracted from this source' 段
+        assert "## Concepts extracted from this source" in content
+
+
+# ---------- Bug 2: write_source 失败回滚 DB ----------
+
+def test_sources_ingest_rolls_back_db_on_write_failure(
+    vault: Path, external: Path, monkeypatch
+):
+    """Bug 2 修复: write_source_file 失败时 delete_source 回滚 DB (DB 不留孤立 source_id).
+
+    之前 sources_ingest 只 try/except _err, 不回滚 DB, 留下 stage_source 写但 raw 没写.
+    """
+    # 准备 external source file
+    src = external / "rollback_test.md"
+    src.write_text("# rollback content", encoding="utf-8")
+
+    import sqlite3
+    # monkeypatch write_source_file 让它 raise OSError
+    from corpus import cli as _cli
+    from corpus import storage as _storage
+    real = _cli.write_source_file
+    def boom(vault_root, raw_path, **kwargs):
+        raise OSError("simulated disk full on raw file write")
+    monkeypatch.setattr(_cli, "write_source_file", boom)
+
+    res = _runner().invoke(cli, [
+        "sources", "ingest", str(vault), str(src), "--json",
+    ])
+    # 应该 exit 1 (OSError 报给 user)
+    assert res.exit_code == 1
+    assert "rolled back" in (res.stderr or "").lower()
+
+    # DB 不应该留 source_id (回滚 delete_source)
+    with sqlite3.connect(str(vault / ".wiki-meta" / "corpus.db")) as c:
+        n = c.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+        assert n == 0, f"DB 应该被回滚, 但还有 {n} 个 source"

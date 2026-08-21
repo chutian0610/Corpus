@@ -789,6 +789,18 @@ def soft_delete_source(
     }
 
 
+def hard_delete_source(db_path: Path, source_id: str) -> None:
+    """硬删 source 行 (sources 表 DELETE). 用于回滚 (ingest 失败时恢复 DB).
+
+    不走 soft_delete, 直接 DELETE 行. 注意: extractions 关联行也在
+    DELETE 时清理 (cascade by FK), 但当前 schema 无 FK 约束, 需手动清理.
+    """
+    with connect(db_path) as conn:
+        # 清理 extractions 关联 (本表没 FK cascade, manual)
+        conn.execute("DELETE FROM extractions WHERE source_id=?", (source_id,))
+        conn.execute("DELETE FROM sources WHERE source_id=?", (source_id,))
+
+
 def dry_run_delete_source(db_path: Path, source_id: str) -> dict[str, Any]:
     """预览：删 source 会影响什么。"""
     with connect(db_path) as conn:
