@@ -131,7 +131,8 @@ uv tool install -e .   # editable, 改了 src/ 立即生效
   - `concepts write` 把 status/aliases/tags 直接透传给 `write_concept_file` 写进 frontmatter
   - `concepts update` 触发 markdown 重写的条件 = body/title/status/extractions/links 任一非 None (任意一项改了都重 sync, 防 drift)
   - `certify` / `unmark` 无条件 sync (score / issues / suggestions 必更新)
-  - `wiki/source/<slug>.md` 更新时保留 article 原文, 仅替换 `## Concepts extracted from this source` 段 (`update_source_page_concepts`)
+  - `wiki/source/<slug>.md` 是 extraction manifest (只有 `## Concepts extracted from this source` 段), **不复制原文**. single source of truth 永远是 `raw/<file>.md` (git 跟踪, 含原文 + frontmatter). 想读原文打开 raw/, 想看 source ↔ concepts 关系看 wiki/source.
+  - 历史 bug 残留: 之前版本 `update_source_page_concepts` 可能把原文写进 wiki/source, 现在每次 sync 都按 single-source-of-truth 回归——自动清掉多余 body, frontmatter 保留.
 - **`export_index` 导出列** (wiki/index/concepts.json): slug / concept_id / title / source_ids / links / is_orphan / version / **status / aliases / tags** / certified_score / certified_at / certified_issues / certified_suggestions / certified_by / created_at / updated_at. body 故意不导出 (体积大, 看概念细节读 wiki/concept/<slug>.md)
 
 **Schema 版本**：当前 `SCHEMA_VERSION=2`。`init_db()` 检测 `schema_meta` 表：

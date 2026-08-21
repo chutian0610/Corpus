@@ -652,8 +652,10 @@ def test_sources_batch_writes_frontmatter_and_wiki_page(vault: Path, external: P
         # frontmatter 含 slug
         assert "slug:" in content
         assert "source_id:" in content
-        # body 段: 原始 content + '## Concepts extracted from this source' 段
+        # wiki/source 是 extraction manifest: 只有 ## Concepts section, 不复制原文
         assert "## Concepts extracted from this source" in content
+        # 原文 sole 在 raw/<file>.md, wiki/source 不复制
+        assert "# rollback content" not in content
 
 
 # ---------- Bug 2: write_source 失败回滚 DB ----------

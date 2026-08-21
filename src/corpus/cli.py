@@ -233,7 +233,7 @@ def _ingest_one_source(
             hint="DB rolled back via delete_source; 重新 ingest 重试",
         ) from e
 
-    # 7. 写 wiki/source/<slug>.md (Bug 2: 失败回滚 DB)
+    # 7. 写 wiki/source/<slug>.md (extraction manifest, 不复制原文)
     try:
         write_source_wiki_page(
             paths["root"],
@@ -243,7 +243,6 @@ def _ingest_one_source(
             content_hash=result["content_hash"],
             size_bytes=result["size_bytes"],
             status="staged",
-            body=content,
         )
     except OSError as e:
         from .storage import hard_delete_source as delete_source

@@ -1572,7 +1572,6 @@ def test_write_source_wiki_page_uses_slug_filename(tmp_path: Path):
         tmp_path, "abc123def4560001", slug="postgresql-13",
         content_hash="abc123de", original_filename="PostgreSQL 13.md",
         size_bytes=100, status="staged",
-        body="# postgresql content",
     )
     assert p.name == "postgresql-13.md"
     assert p.parent.name == "source"
@@ -1580,6 +1579,10 @@ def test_write_source_wiki_page_uses_slug_filename(tmp_path: Path):
     meta = read_source_file(p)
     assert meta["slug"] == "postgresql-13"
     assert meta["source_id"] == "abc123def4560001"
+    # wiki/source 是 extraction manifest, 不复制原文
+    body = p.read_text()
+    assert "# postgresql content" not in body
+    assert "## Concepts extracted from this source" in body
 
 
 def test_write_source_wiki_page_slug_collision(tmp_path: Path):
@@ -1587,20 +1590,24 @@ def test_write_source_wiki_page_slug_collision(tmp_path: Path):
     from corpus.storage import write_source_wiki_page, read_source_file
     # 第一个 slug=postgresql
     p1 = write_source_wiki_page(tmp_path, "id1", slug="postgresql",
-                                content_hash="abc123de", body="v1")
+                                content_hash="abc123de")
     # 第二个同 slug, 不同 source_id + hash
     p2 = write_source_wiki_page(tmp_path, "id2", slug="postgresql",
-                                content_hash="fed45678", body="v2")
+                                content_hash="fed45678")
     assert p1.name == "postgresql.md"
     assert p2.name == "postgresql-fed45678.md"
-    # 两个内容都保留
-    assert "v1" in p1.read_text()
-    assert "v2" in p2.read_text()
+    # 两个文件都存在, 都带 section header (没有 body 混进)
+    assert "## Concepts extracted from this source" in p1.read_text()
+    assert "## Concepts extracted from this source" in p2.read_text()
 
 
-# ---------- Bug D: source page body 不丢 ----------
-def test_update_source_page_concepts_preserves_body(tmp_path: Path):
-    """update_source_page_concepts 重写 '## Concepts extracted' 段不丢 article body."""
+# ---------- wiki/source 不复制原文 (single source of truth = raw/<file>.md) ----------
+def test_update_source_page_concepts_writes_only_section(tmp_path: Path):
+    """update_source_page_concepts 只写 extraction section, 不复制原文.
+
+    wiki/source 是 manifest (frontmatter + Concepts 表), 原文 sole 在 raw/.
+    即便 wiki/source 历史数据里夹了原文 (历史 bug), sync 也会被清掉.
+    """
     from corpus.storage import (
         init_db, stage_source, write_source_wiki_page,
         update_source_page_concepts, write_concept,
@@ -1619,18 +1626,23 @@ def test_update_source_page_concepts_preserves_body(tmp_path: Path):
     )
     sid = src["source_id"]
 
-    # 写 wiki/source/<slug>.md, 含 article body
-    article_body = (
-        "# Article\n\nbody content here\n\n"
-        "## Concepts extracted from this source\n\n"
-        "_(none yet)_\n"
-    )
+    # 故意模拟「历史数据 / 误用」: wiki/source 写了带原文的 body.
+    # 这是 cleanup 之前可能出现的状态. sync 应该自动清掉.
     src_path = write_source_wiki_page(
         tmp_path, sid, slug="article-test",
         content_hash=src["content_hash"],
         original_filename="article.md", size_bytes=src["size_bytes"],
-        status="staged", body=article_body,
+        status="staged",
     )
+    # 手动注入原文污染 frontmatter 外的 body (模拟历史 bug 残留)
+    from corpus.storage import _write_md, _read_md, _build_concepts_extracted_section
+    meta, _ = _read_md(src_path)
+    polluted_body = (
+        "# Article\n\nbody content here\n\n"
+        "## Concepts extracted from this source\n\n"
+        "_(none yet)_\n"
+    )
+    _write_md(src_path, meta=meta, body=polluted_body)
 
     # 加 extraction
     write_concept(
@@ -1643,53 +1655,24 @@ def test_update_source_page_concepts_preserves_body(tmp_path: Path):
         links=[],
     )
 
-    # 调 update_source_page_concepts —— 模拟 concepts write 后的同步
     update_source_page_concepts(tmp_path, sid)
-
     final = src_path.read_text()
-    # article body 必须在
-    assert "# Article" in final, "article heading was lost"
-    assert "body content here" in final, "article body was lost"
-    # extraction 也必须在
-    assert "my-concept" in final
-    assert "body content here" in final  # quote_span 显示
-    # 段标题必须在
+
+    # frontmatter 保留
+    assert "slug: article-test" in final
+    # 原文必须清掉 (single source of truth = raw/)
+    assert "# Article\n" not in final, (
+        "原文不应当在 wiki/source — 应该 sole 在 raw/<file>.md"
+    )
+    # extraction 表必须在 (table 格式)
+    assert "[[my-concept]]" in final
+    assert "body content here" in final  # quote_span 在 evidence cell 显示
     assert "## Concepts extracted from this source" in final
-    # 旧占位符 _(none yet)_ 已被替换 (不能 出现两次)
+    assert "| Concept | Confidence | Evidence (quote span) | Prompt | Extracted at |" in final
+    # 旧占位符 _(none yet)_ 已被替换
     assert final.count("_(none yet)_") == 0
 
 
-def test_update_source_page_concepts_no_body_works(tmp_path: Path):
-    """初次 (没 article body) 也得能写 section."""
-    from corpus.storage import (
-        init_db, stage_source, write_source_wiki_page,
-        update_source_page_concepts,
-    )
-
-    vault = tmp_path
-    db_path = vault / ".wiki-meta" / "corpus.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    init_db(db_path)
-
-    src = stage_source(
-        db_path,
-        raw_path=tmp_path / "raw" / "x.md",
-        content="x", original_filename="x.md",
-    )
-    sid = src["source_id"]
-
-    src_path = write_source_wiki_page(
-        tmp_path, sid, slug="x",
-        content_hash=src["content_hash"], original_filename="x.md",
-        size_bytes=src["size_bytes"], status="staged",
-        body="## Concepts extracted from this source\n\n_(none yet)_\n",
-    )
-
-    update_source_page_concepts(tmp_path, sid)
-    final = src_path.read_text()
-    # 没 article body 时只写 section, 不能崩
-    assert "## Concepts extracted from this source" in final
-    assert "_(none yet)_" in final
 
 
 # ---------- Bug A: write_concept_file 接 status/aliases/tags ----------
@@ -1767,3 +1750,125 @@ def test_update_concept_status_syncs_to_markdown(
     assert md_meta["status"] == "evergreen", (
         "markdown status 没更新 — Bug B 仍存在"
     )
+
+
+# ---------- _build_concepts_extracted_section: markdown table format ----------
+def test_build_concepts_extracted_section_table_format(tmp_path: Path):
+    """_build_concepts_extracted_section 输出 markdown table (5 列).
+
+    安全处理: quote_span 含 `|` 必须 escape 成 `\\|`; 含换行拍平成空格."""
+    from corpus.storage import (
+        init_db, stage_source, write_concept,
+        _build_concepts_extracted_section,
+    )
+
+    vault = tmp_path
+    db_path = vault / ".wiki-meta" / "corpus.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    src = stage_source(
+        db_path,
+        raw_path=tmp_path / "raw" / "art.md",
+        content="x", original_filename="art.md",
+    )
+    sid = src["source_id"]
+
+    # 3 个 extraction: 1) 普通; 2) 含 pipe; 3) 含换行.
+    # prompt_version 是 write_concept 函数级参数 (不是 per-source).
+    write_concept(
+        db_path,
+        slug="plain", title="P", body="",
+        extractions_data=[{
+            "source_id": sid,
+            "quote_span": "plain evidence here",
+            "confidence": 0.85,
+        }],
+        links=[],
+        prompt_version="extract-v1",
+    )
+    write_concept(
+        db_path,
+        slug="with-pipe", title="WP", body="",
+        extractions_data=[{
+            "source_id": sid,
+            "quote_span": "grep -m 1 -E 'vmx|svm' /proc/cpuinfo",
+            "confidence": 0.92,
+        }],
+        links=[],
+        prompt_version="extract-v1",
+    )
+    # 多行 quote_span + 缺 confidence + 换 prompt
+    write_concept(
+        db_path,
+        slug="multi-line", title="ML", body="",
+        extractions_data=[{
+            "source_id": sid,
+            "quote_span": "line one\nline two\nline three",
+            "confidence": None,
+        }],
+        links=[],
+        prompt_version="extract-v2",
+    )
+
+    section = _build_concepts_extracted_section(vault, sid, body="")
+
+    # 表头/分隔行
+    assert "| Concept | Confidence | Evidence (quote span) | Prompt | Extracted at |" in section
+    assert "| --- | --- | --- | --- | --- |" in section
+
+    # 每个 concept 一行
+    assert "[[plain]]" in section
+    assert "[[with-pipe]]" in section
+    assert "[[multi-line]]" in section
+
+    # 含 pipe 的 quote 必须 escape -> 表格 row 不会 break
+    assert "vmx\\|svm" in section, "pipe in quote_span should be escaped to \\|"
+    assert "vmx|svm" not in section.replace("\\|", "")  # 只在 escape 之外没有 raw pipe
+
+    # 换行拍平成空格 — 不能在同一 cell 里出现多行
+    rows = [r for r in section.split("\n") if "[[multi-line]]" in r]
+    assert rows, "multi-line concept 应该出现在至少一行"
+    multi_line_row = rows[0]
+    assert "line one line two line three" in multi_line_row
+    # 6 个未 escape 的 '|' (leading + 5 列 = 6 cell boundaries 内含 5 col-divider + 2 outer = 6 内部 pipes... 见下)
+    # 实际 multi-line_row 形如: | [[multi-line]] |  | line one line two line three | extract-v2 | <at> |
+    # 数 row 中未 escape 的 pipe: 6 (leading + 4 dividers + trailing) = 6
+    unescaped = multi_line_row.replace("\\|", "")
+    assert unescaped.count("|") == 6, (
+        f"table row 里应恰好 6 个未 escape 的 '|', 实际 {unescaped.count('|')}, row={multi_line_row!r}"
+    )
+
+    # confidence 缺省对应 cell 空
+    unescaped = multi_line_row.replace("\\|", "")
+    cells = unescaped.split("|")
+    # layout: '' (leading), ' [[multi-line]] ', '  ' (conf), ' line one line two line three ',
+    #         ' extract-v2 ' (prompt), ' <at> ', '' (trailing)
+    assert cells[2].strip() == "", f"缺 confidence 时 cell 应留空, got {cells[2]!r}"
+    # prompt cell 也填了 (区别于 confidence cell)
+    assert cells[3].strip().startswith("line one"), "evidence cell 内容错位"
+    assert cells[4].strip() == "extract-v2", f"prompt cell 错位, got {cells[4]!r}"
+
+    # confidence 数值格式
+    assert "| 0.85 |" in section
+    assert "| 0.92 |" in section
+
+    # prompt_version 也填进 cell
+    assert "extract-v1" in section
+    assert "extract-v2" in section
+
+
+def test_build_concepts_extracted_section_empty_db(tmp_path: Path):
+    """无 DB / 无 rows 时, 返回占位符而不崩."""
+    from corpus.storage import _build_concepts_extracted_section
+
+    s1 = _build_concepts_extracted_section(tmp_path, "no-such-source", body="")
+    assert "_(no DB)_" in s1
+
+    # 有 DB 但 extractions 空 -> _(none yet)_
+    from corpus.storage import init_db
+    db_path = tmp_path / ".wiki-meta" / "corpus.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+    s2 = _build_concepts_extracted_section(tmp_path, "still-no-source", body="")
+    assert "_(none yet)_" in s2

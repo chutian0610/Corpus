@@ -1202,7 +1202,15 @@ def write_source_file(
 def _build_concepts_extracted_section(
     vault_root: Path, source_id: str, body: str,
 ) -> str:
-    """生成 '## Concepts extracted from this source' section, 反查 extractions 表."""
+    """生成 '## Concepts extracted from this source' section, 反查 extractions 表.
+
+    输出 markdown table: | Concept | Confidence | Evidence (quote span) | Prompt | Extracted at |
+
+    安全处理:
+      - quote_span 里的 pipe 转义成 backslash-pipe (防 break table row)
+      - quote_span 里的换行拍平成空格 (一行一 record)
+      - 缺 confidence / prompt_version 时该 cell 留空
+    """
     db_path = vault_root / ".wiki-meta" / "corpus.db"
     if not db_path.exists():
         return "## Concepts extracted from this source\n\n_(no DB)_\n"
@@ -1215,15 +1223,36 @@ def _build_concepts_extracted_section(
         ).fetchall()
     if not rows:
         return "## Concepts extracted from this source\n\n_(none yet)_\n"
-    lines = ["## Concepts extracted from this source", ""]
+
+    def _cell(value: str) -> str:
+        # table cell 转义: pipe + 换行
+        return (
+            (value or "")
+            .replace("\r\n", " ")
+            .replace("\n", " ")
+            .replace("\r", " ")
+            .replace("|", "\\|")
+        )
+
+    header = [
+        "## Concepts extracted from this source",
+        "",
+        "| Concept | Confidence | Evidence (quote span) | Prompt | Extracted at |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    lines = list(header)
     for r in rows:
-        confidence_str = f" (confidence {r['confidence']:.2f})" if r["confidence"] is not None else ""
-        prompt_str = f" [{r['prompt_version']}]" if r["prompt_version"] else ""
-        quote = (r["quote_span"] or "").replace("\n", " ")[:80]
-        if len(r["quote_span"] or "") > 80:
-            quote += "..."
+        confidence = (
+            f"{r['confidence']:.2f}" if r["confidence"] is not None else ""
+        )
         lines.append(
-            f"- [[{r['concept_slug']}]]{prompt_str}{confidence_str} \u2014 \"{quote}\" ({r['extracted_at']})"
+            "| [[{slug}]] | {conf} | {evidence} | {prompt} | {at} |".format(
+                slug=r["concept_slug"],
+                conf=confidence,
+                evidence=_cell(r["quote_span"] or ""),
+                prompt=_cell(r["prompt_version"] or ""),
+                at=_cell(r["extracted_at"] or ""),
+            )
         )
     return "\n".join(lines)
 
@@ -1238,14 +1267,15 @@ def write_source_wiki_page(
     size_bytes: int | None = None,
     status: str = "staged",
     created_at: str | None = None,
-    body: str = "",
 ) -> Path:
-    """写 wiki/source/<slug>.md (per-source wiki 页, obsidian 兼容).
+    """写 wiki/source/<slug>.md (per-source wiki 页 = extraction manifest).
 
-    frontmatter: source_id / original_filename / content_hash / size_bytes / status / created_at.
-    body: 原始 markdown (用户提供) + '## Concepts extracted from this source' section (DB 反查填充).
+    frontmatter: source_id / slug / type / original_filename / content_hash / size_bytes / status / created_at.
+    body: 只有 '## Concepts extracted from this source' section (DB 反查 extractions 表填充).
 
-    替代 wiki/index/concepts.json 里 source 列表, 直接 git 跟踪.
+    设计: wiki/source/<slug>.md 是 source ↔ concepts 的关系索引, 不复制原文.
+    原文 single source of truth 是 raw/<file>.md (git 跟踪, 带 frontmatter).
+    想读原文请打开 raw/<file>.md, 想看某 source 抽了哪些 concept 看本页.
     """
     pages_dir = vault_root / "wiki" / "source"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -1264,17 +1294,17 @@ def write_source_wiki_page(
         meta["size_bytes"] = size_bytes
     meta["status"] = status
     meta["created_at"] = now
-    concepts_section = _build_concepts_extracted_section(vault_root, source_id, body)
-    full_body = body.rstrip() + "\n\n" + concepts_section
-    _write_md(path, meta=meta, body=full_body)
+    concepts_section = _build_concepts_extracted_section(vault_root, source_id, body="")
+    _write_md(path, meta=meta, body=concepts_section)
     return path
 
 
 def update_source_page_concepts(vault_root: Path, source_id: str) -> None:
-    """重写 wiki/source/<slug>.md 的 '## Concepts extracted' section.
+    """重写 wiki/source/<slug>.md 的 '## Concepts extracted' section (从 DB 反查 extractions).
 
-    从 DB 反查 extractions (source_id), 重新生成完整 file.
-    调用场景: concepts add-source / remove-source / remove-extraction 改了 extractions 后.
+    wiki/source 不复制原文 (原文在 raw/<file>.md), 所以这个函数只覆写 section,
+    frontmatter 保留. 调用场景: concepts add-source / remove-source / remove-extraction
+    改了 extractions 后.
 
     按 source_id frontmatter 找 page 文件 (源页 path 实际是 <slug>.md 不是 <source_id>.md).
     """
@@ -1291,22 +1321,12 @@ def update_source_page_concepts(vault_root: Path, source_id: str) -> None:
             break
     if target is None:
         return
-    meta, body = _read_md(target)
-    section_marker = "\n## Concepts extracted from this source"
-    if section_marker in body:
-        original_body = body.split(section_marker)[0].rstrip()
-    else:
-        original_body = body.rstrip()
+    # 只刷新 '## Concepts extracted' section. 如果旧文件误带了原文 (历史数据),
+    # 同步时被清掉 —— 这正是 single-source-of-truth 的回归保护.
     new_concepts_section = _build_concepts_extracted_section(
-        vault_root, source_id, original_body,
+        vault_root, source_id, body="",
     )
-    # 保留原 article body,仅替换 '## Concepts extracted' 段.
-    # 之前版本只写 new_concepts_section,会把 article 原文吃掉.
-    full_body = (
-        original_body + "\n\n" + new_concepts_section
-        if original_body else new_concepts_section
-    )
-    _write_md(target, meta=meta, body=full_body)
+    _write_md(target, meta=meta, body=new_concepts_section)
 
 
 def read_source_file(path: Path) -> dict[str, Any] | None:
