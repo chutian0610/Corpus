@@ -250,11 +250,11 @@ def cli() -> None:
     \b
     Quick start:
       corpus vault init ~/my-wiki
-      corpus sources ingest ~/my-wiki ~/notes/postgresql.md
+      corpus sources add ~/my-wiki ~/notes/postgresql.md
       corpus concepts write ~/my-wiki \\
         --slug postgres-mvcc --title "PostgreSQL MVCC" \\
-        --body "..." --source-ids <sid> --links postgres
-      corpus stats ~/my-wiki
+        --body-file body.md --extractions-file extr.json
+      corpus vault inspect ~/my-wiki
 
     LLM 调用（extract / compile / 评分）由 agent 自己做，corpus 不装 LLM。
     """
@@ -263,7 +263,7 @@ def cli() -> None:
 
 @cli.group()
 def vault() -> None:
-    """vault 生命周期：init / info / stats。"""
+    """vault 生命周期：init / inspect。"""
 
 @vault.command(name="init")
 @click.argument("vault_path", type=click.Path(path_type=Path))
@@ -345,7 +345,7 @@ def sources() -> None:
 @click.option("--json", "as_json", is_flag=True)
 def sources_add(vault_path: Path, path: Path, glob_pattern: str, recursive: bool,
                 force_revive: bool, as_json: bool) -> None:
-    """单文件或目录入库 (统一老的 `sources ingest` + `sources batch`).
+    """单文件或目录入库 (path 是文件或目录, auto-detect).
 
     path 是文件 → 单文件 ingest (content-hash dedup + --force-revive)
     path 是目录 → batch mode 按 --glob (default *.md), --recursive (default True)
@@ -468,7 +468,6 @@ def sources_mark_state(
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
 
-# 老 `sources ingest <vault> <file>` 改为 alias — 转发到 sources_add
 @sources.command(name="delete")
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("source_id")
