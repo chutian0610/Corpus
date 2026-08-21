@@ -52,6 +52,8 @@ _INITIAL_GITIGNORE = """# corpus vault runtime data (SQLite + .wiki-meta/)
 .wiki-meta/
 # 顶冠 index snapshot (opt-in, `corpus index sync <vault>` 手动生成; 默认不入 git)
 wiki/index/*.json
+# 临时工作目录
+.tmp/
 """
 
 _GITKEEP_REL_PATHS = ("raw", "wiki/concept", "wiki/index")

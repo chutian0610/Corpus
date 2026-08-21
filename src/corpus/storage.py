@@ -37,7 +37,7 @@ from .frontmatter import (
     write_md_with_frontmatter as _write_md,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Migration 步骤表: key=(from_v, to_v), value=函数(conn)
 _MIGRATIONS: dict[tuple[int, int], str] = {
@@ -45,20 +45,33 @@ _MIGRATIONS: dict[tuple[int, int], str] = {
     (2, 3): "_migrate_2_to_3",
     (3, 4): "_migrate_3_to_4",
     (4, 5): "_migrate_4_to_5",
+    (5, 6): "_migrate_5_to_6",
 }
 
 def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
-    """v1 → v2: 去掉 sources.content_hash 的 UNIQUE 约束.
+    """v1 → v2: 去掉 sources.content_hash 的 UNIQUE 约束 + 软删列.
 
-    SQLite 没有 ALTER TABLE DROP CONSTRAINT，标准做法是 rename + recreate.
+    SQLite 没有 ALTER TABLE DROP CONSTRAINT，标准 rename + recreate.
+
+    兼容 legacy v1 (有 original_filename 列 + UNIQUE on content_hash) 和新 fresh init:
+    - fresh init sources 已无 UNIQUE (v6 schema inline), 跳过本步避免误删 schema_meta.
     """
+    # PRAGMA table_info 给的是 legacy sources (v1 schema) 或 fresh init 的 sources (v2+ schema).
+    legacy_cols = {row[1] for row in conn.execute("PRAGMA table_info(sources)").fetchall()}
+    if "status" in legacy_cols:
+        # 已经是 v2+ schema (status 列在), 跳过 (idempotent — fresh init 后跑了 v6 inline 也类似).
+        return
+    has_original_filename = "original_filename" in legacy_cols
+    original_filename_select = (
+        "original_filename," if has_original_filename else ""
+    )
+
     conn.executescript(
-        """
+        f"""
         ALTER TABLE sources RENAME TO sources__v1;
         CREATE TABLE sources (
             source_id TEXT PRIMARY KEY,
             raw_path TEXT NOT NULL,
-            original_filename TEXT,
             size_bytes INTEGER NOT NULL,
             content_hash TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'staged',
@@ -68,15 +81,18 @@ def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
             deleted_reason TEXT
         );
         INSERT INTO sources
-            SELECT source_id, raw_path, original_filename, size_bytes,
-                   content_hash, status, created_at, committed_at,
-                   deleted_at, deleted_reason
+            (source_id, raw_path, size_bytes, content_hash, status,
+             created_at, committed_at, deleted_at, deleted_reason)
+            SELECT source_id, raw_path, size_bytes, content_hash, 'staged',
+                   created_at, committed_at, deleted_at, deleted_reason
             FROM sources__v1;
         DROP TABLE sources__v1;
         CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status);
         CREATE INDEX IF NOT EXISTS idx_sources_content_hash ON sources(content_hash);
         """
     )
+    # 历史上 original_filename 一直保留到 v6 DROP COLUMN. v1 库的列在 v2 schema 里也保留;
+    # legacy 数据原样过来, 后续 v5->v6 自动 drop.
 
 
 def _migrate_2_to_3(conn: sqlite3.Connection) -> None:
@@ -130,7 +146,6 @@ _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
     source_id TEXT PRIMARY KEY,
     raw_path TEXT NOT NULL,
-    original_filename TEXT,
     size_bytes INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'staged',  -- staged / committed / deleted
@@ -320,6 +335,27 @@ def _migrate_4_to_5(conn: sqlite3.Connection) -> None:
     )
 
 
+
+def _migrate_5_to_6(conn: sqlite3.Connection) -> None:
+    """v5 -> v6: drop sources.original_filename 列.
+
+    设计: original_filename 是 informational breadcrumb (用户原名 vs raw_path
+    实际文件名), 但 0 个 reader 拿它做决策 / 展示. wikisource frontmatter 写它
+    反而给人类读者挖坑 (期望 = raw/ 实际文件, 实际 = 用户原名).
+
+    降级为 sources.raw_path 的派生量 (Path(raw_path).name), 数据流上不再单独存一列.
+
+    SQLite 3.35+ 支持 ALTER TABLE ... DROP COLUMN. Python 3.11+ ships 3.37+.
+    幂等: 没该列时跳过 (fresh init 等情况).
+    """
+    # 旧文件 (raw/<file>.md, wiki/source/<slug>.md) frontmatter 仍可能含
+    # original_filename: 字段 — orphan, YAML roundtrip 容错, 不会破坏读写.
+    # 已有 vault 不主动回写 (用户下次 reingest / corpus concepts update --status
+    # 才会重写 frontmatter, 那时就自然干净).
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sources)").fetchall()}
+    if "original_filename" not in cols:
+        return
+    conn.executescript("ALTER TABLE sources DROP COLUMN original_filename;")
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -573,11 +609,14 @@ def stage_source(
     *,
     raw_path: Path,
     content: str,
-    original_filename: str | None = None,
     revive_on_deleted: bool = False,
 ) -> dict[str, Any]:
-    """落源到 sources 表。dedup by content_hash, status-aware:
+    """落源到 sources 表。dedup by content_hash, status-aware.
 
+    original_filename 列 (schema v6) 已 drop — raw/<file>.md 的 basename
+    (post-ingest-<UTC> 后缀) 就是 source 真实身份, 不再单独存.
+
+    Status 表:
     - 同 hash 且 status in (staged, committed) → 抛 ConflictError.
     - 同 hash 且 status='deleted':
         - revive_on_deleted=False → 抛 ConflictError (提示 --force-revive).
@@ -607,14 +646,10 @@ def stage_source(
                     )
                 # 复活: 保留 source_id 不变 (extractions / concepts 引用稳定),
                 # 清掉 deleted_* 字段, 刷新 raw_path / size / content_hash / created_at.
-                effective_revive_filename = (
-                    original_filename if original_filename else raw_path.name
-                )
                 conn.execute(
                     """UPDATE sources SET
                         status='staged',
                         raw_path=?,
-                        original_filename=?,
                         size_bytes=?,
                         content_hash=?,
                         created_at=?,
@@ -624,7 +659,6 @@ def stage_source(
                     WHERE source_id=?""",
                     (
                         str(raw_path),
-                        effective_revive_filename,
                         len(content_bytes),
                         content_hash,
                         now,
@@ -645,20 +679,14 @@ def stage_source(
                 f"duplicate content already staged as {existing['raw_path']}",
                 hint=f"existing source_id: {existing_id}, status={existing_status}",
             )
-        # original_filename 默认 = raw_path.name (raw/ 下实际文件名).
-        # 旧 caller 可以显式传 None 或某个 cleanup 过 ingest 后缀的名字作为 override.
-        effective_original_filename = (
-            original_filename if original_filename else raw_path.name
-        )
         try:
             conn.execute(
                 """INSERT INTO sources
-                (source_id, raw_path, original_filename, size_bytes, content_hash, status, created_at)
-                VALUES (?, ?, ?, ?, ?, 'staged', ?)""",
+                (source_id, raw_path, size_bytes, content_hash, status, created_at)
+                VALUES (?, ?, ?, ?, 'staged', ?)""",
                 (
                     sid,
                     str(raw_path),
-                    effective_original_filename,
                     len(content_bytes),
                     content_hash,
                     now,
@@ -1117,13 +1145,12 @@ def _upsert_source_from_meta(conn, sid: str, raw_path: Path, meta: dict) -> None
     try:
         conn.execute(
             """INSERT INTO sources
-            (source_id, raw_path, original_filename, size_bytes, content_hash, status,
+            (source_id, raw_path, size_bytes, content_hash, status,
              created_at, committed_at, deleted_at, deleted_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)""",
+            VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)""",
             (
                 sid,
                 str(raw_path),
-                meta.get("original_filename", raw_path.name),
                 meta.get("size_bytes", raw_path.stat().st_size),
                 meta.get("content_hash", ""),
                 meta.get("status", "staged"),
@@ -1133,12 +1160,11 @@ def _upsert_source_from_meta(conn, sid: str, raw_path: Path, meta: dict) -> None
     except sqlite3.IntegrityError:
         conn.execute(
             """UPDATE sources
-            SET raw_path=?, original_filename=?, size_bytes=?, content_hash=?, status=?,
+            SET raw_path=?, size_bytes=?, content_hash=?, status=?,
                 created_at=?
             WHERE source_id=?""",
             (
                 str(raw_path),
-                meta.get("original_filename", raw_path.name),
                 meta.get("size_bytes", raw_path.stat().st_size),
                 meta.get("content_hash", ""),
                 meta.get("status", "staged"),
@@ -1224,7 +1250,6 @@ def write_source_file(
     raw_path: Path,
     *,
     source_id: str,
-    original_filename: str,
     content_hash: str,
     size_bytes: int,
     status: str = "staged",
@@ -1238,11 +1263,13 @@ def write_source_file(
     body 是原始 markdown (用户提供).
 
     替代 plain write_text, 让 raw/<file> 也是 source of truth.
+
+    original_filename 列 v6 已 drop — 不再写入 frontmatter (raw/<file>.md
+    的 basename 就是 source 的真实文件名).
     """
     now = created_at or _utc_now_iso()
     meta = {
         "source_id": source_id,
-        "original_filename": original_filename,
         "content_hash": content_hash,
         "size_bytes": size_bytes,
         "status": status,
@@ -1316,19 +1343,20 @@ def write_source_wiki_page(
     *,
     slug: str,
     content_hash: str | None = None,
-    original_filename: str | None = None,
     size_bytes: int | None = None,
     status: str = "staged",
     created_at: str | None = None,
 ) -> Path:
     """写 wiki/source/<slug>.md (per-source wiki 页 = extraction manifest).
 
-    frontmatter: source_id / slug / type / original_filename / content_hash / size_bytes / status / created_at.
+    frontmatter: source_id / slug / type / content_hash / size_bytes / status / created_at.
     body: 只有 '## Concepts extracted from this source' section (DB 反查 extractions 表填充).
 
     设计: wiki/source/<slug>.md 是 source ↔ concepts 的关系索引, 不复制原文.
     原文 single source of truth 是 raw/<file>.md (git 跟踪, 带 frontmatter).
     想读原文请打开 raw/<file>.md, 想看某 source 抽了哪些 concept 看本页.
+
+    original_filename 列 v6 已 drop — 不再写 frontmatter.
     """
     pages_dir = vault_root / "wiki" / "source"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -1339,8 +1367,6 @@ def write_source_wiki_page(
         "slug": slug,
         "type": "source",
     }
-    if original_filename:
-        meta["original_filename"] = original_filename
     if content_hash:
         meta["content_hash"] = content_hash
     if size_bytes is not None:
@@ -2430,7 +2456,7 @@ def export_index(db_path: Path, wiki_index_dir: Path) -> dict[str, Any]:
             FROM concepts ORDER BY slug"""
         ).fetchall()
         sources_rows = conn.execute(
-            """SELECT source_id, raw_path, original_filename, status,
+            """SELECT source_id, raw_path, status,
                       size_bytes, created_at, committed_at, deleted_at
             FROM sources ORDER BY created_at DESC"""
         ).fetchall()

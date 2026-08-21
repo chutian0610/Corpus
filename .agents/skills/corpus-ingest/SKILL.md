@@ -296,12 +296,12 @@ corpus index sync <vault> --json
 ## Source page 同步 (双向)
 
 `corpus sources ingest` / `batch` 自动写 `wiki/source/<slug>.md` (obsidian 兼容).
-slug = `slugify(original_filename)`. 重名时 pick_source_page_target 加 `-<short-hash>` 后缀.
+slug = `slugify(canonical.stem)` (canonical 是 ingest 时的源文件路径). 重名时 pick_source_page_target 加 `-<short-hash>` 后缀.
 
 `wiki/source/<slug>.md` frontmatter 包含:
 - `source_id` (16 hex, 稳定 identifier)
 - `slug` (易读别名, 跨 vault wikilink 引用)
-- `original_filename` / `content_hash` / `size_bytes` / `status` / `created_at`
+- `content_hash` / `size_bytes` / `status` / `created_at`  (raw/<file>.md 的 basename 即原始名, schema v6 起了无 original_filename 列)
 
 `corpus concepts add-source / remove-source / remove-extraction` 反向触发 `update_source_page_concepts`:
 重写 source page 的 `## Concepts extracted from this source` 段 (从 DB extractions 表反查).

@@ -165,7 +165,7 @@ def test_batch_renames_and_counts_revived(vault: Path, external: Path):
     # 准备: 直接 stage 一个 source, 然后软删 (供 batch 复活)
     res = stage_source(
         db, raw_path=vault / "raw" / "ghost.md",
-        content="ghost content", original_filename="ghost.md")
+        content="ghost content")
     ghost_sid = res["source_id"]
     soft_delete_source(db, ghost_sid)
 
@@ -199,7 +199,7 @@ def test_batch_without_revive_flags_deleted_as_failed(vault: Path, external: Pat
     db = vault / ".wiki-meta" / "corpus.db"
     res = stage_source(
         db, raw_path=vault / "raw" / "z.md",
-        content="z content", original_filename="z.md")
+        content="z content")
     soft_delete_source(db, res["source_id"])
 
     src_dir = external
@@ -645,7 +645,7 @@ def test_sources_batch_writes_frontmatter_and_wiki_page(vault: Path, external: P
         assert content.startswith("---"), f"{f.name} 应该有 frontmatter"
         assert "source_id:" in content
         assert "content_hash:" in content
-        assert "original_filename:" in content
+
 
     # 2. wiki/source/<slug>.md 存在 (obsidian 兼容)
     src_pages = [p for p in (vault / "wiki" / "source").iterdir() if p.name != ".tmp"]

@@ -45,8 +45,7 @@ def staged_source(db: Path) -> str:
     result = stage_source(
         db,
         raw_path=Path("/tmp/raw/a.md"),
-        content="hello",
-        original_filename="a.md")
+        content="hello")
     return result["source_id"]
 
 
@@ -62,7 +61,7 @@ def _make_extraction(source_id: str, quote: str = "Each row carries xmin/xmax") 
 # ---------- sources ----------
 
 def test_stage_source_returns_metadata(db: Path):
-    result = stage_source(db, raw_path=Path("/tmp/raw/a.md"), content="hello", original_filename="a.md")
+    result = stage_source(db, raw_path=Path("/tmp/raw/a.md"), content="hello")
     assert result["status"] == "staged"
     assert len(result["source_id"]) == 16
 
@@ -393,17 +392,17 @@ def test_stage_source_revives_deleted_when_flag_set(db: Path):
     """soft_delete 后再 stage 同内容 + revive_on_deleted=True → 复用 sid, status=staged."""
     from corpus.storage import soft_delete_source
     raw = Path("/tmp/raw/rev.md")
-    result1 = stage_source(db, raw_path=raw, content="same content", original_filename="rev.md")
+    result1 = stage_source(db, raw_path=raw, content="same content")
     sid1 = result1["source_id"]
     soft_delete_source(db, sid1, deleted_reason="test")
     # 同内容再 stage, 不带 flag → 报错
     with pytest.raises(ConflictError) as exc:
-        stage_source(db, raw_path=raw, content="same content", original_filename="rev.md")
+        stage_source(db, raw_path=raw, content="same content")
     assert "deleted" in str(exc.value).lower()
     assert exc.value.hint and "force-revive" in exc.value.hint
     # 带 flag → 复活
     result2 = stage_source(
-        db, raw_path=raw, content="same content", original_filename="rev.md",
+        db, raw_path=raw, content="same content",
         revive_on_deleted=True)
     assert result2["source_id"] == sid1  # 保留 sid
     assert result2["status"] == "staged"
@@ -417,20 +416,20 @@ def test_stage_source_revives_deleted_when_flag_set(db: Path):
 def test_stage_source_deleted_without_flag_raises(db: Path):
     """deleted 同 hash 不带 revive flag → ConflictError, hint 提示 --force-revive."""
     from corpus.storage import soft_delete_source
-    result = stage_source(db, raw_path=Path("/tmp/raw/x.md"), content="foo", original_filename="x.md")
+    result = stage_source(db, raw_path=Path("/tmp/raw/x.md"), content="foo")
     soft_delete_source(db, result["source_id"], deleted_reason="oops")
     with pytest.raises(ConflictError) as exc:
-        stage_source(db, raw_path=Path("/tmp/raw/x.md"), content="foo", original_filename="x.md")
+        stage_source(db, raw_path=Path("/tmp/raw/x.md"), content="foo")
     assert "deleted" in str(exc.value).lower()
     assert exc.value.hint and "--force-revive" in exc.value.hint
 
 
 def test_stage_source_active_duplicate_still_rejected(db: Path):
     """active (staged/committed) 同 hash → 仍报 ConflictError (即使 revive_on_deleted=True)."""
-    result = stage_source(db, raw_path=Path("/tmp/raw/d.md"), content="dup", original_filename="d.md")
+    result = stage_source(db, raw_path=Path("/tmp/raw/d.md"), content="dup")
     with pytest.raises(ConflictError) as exc:
         stage_source(
-            db, raw_path=Path("/tmp/raw/d.md"), content="dup", original_filename="d.md",
+            db, raw_path=Path("/tmp/raw/d.md"), content="dup",
             revive_on_deleted=True,  # 即使 flag 为真也不能复活 active 行
         )
     assert "duplicate" in str(exc.value).lower()
@@ -476,15 +475,15 @@ def test_init_db_upgrades_v1_to_v5(tmp_path: Path):
         c.row_factory = sqlite3.Row
         # 没 UNIQUE 了 -> 允许重复 hash 行
         c.execute(
-            "INSERT INTO sources (source_id, raw_path, original_filename, size_bytes, content_hash, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("abc1234567890124", "/raw/old2.md", "old.md", 5,
-             "abcdef0000000000000000000000000000000000000000000000000000000000",
+            "INSERT INTO sources (source_id, raw_path, size_bytes, content_hash, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("abc1234567890124", "/raw/old2.md", 5,
+             "abcdef0000000000000000000000000000000000000000000000000000000",
              "staged", "2025-01-01T00:00:00+00:00"))
         rows = c.execute("SELECT * FROM sources").fetchall()
         assert len(rows) == 2
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver["value"]) == 5
+        assert int(ver["value"]) == 6
         # 索引存在
         idx = c.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sources_content_hash'"
@@ -492,16 +491,16 @@ def test_init_db_upgrades_v1_to_v5(tmp_path: Path):
         assert idx is not None
 
 
-def test_init_db_idempotent_on_v5(tmp_path: Path):
-    """已 v5 的库 init_db 多次也幂等, version 不漂."""
-    db_path = tmp_path / "v5.db"
+def test_init_db_idempotent_on_v6(tmp_path: Path):
+    """已 v6 的库 init_db 多次也幂等, version 不漂."""
+    db_path = tmp_path / "v6.db"
     init_db(db_path)
     init_db(db_path)
     init_db(db_path)
     import sqlite3
     with sqlite3.connect(str(db_path)) as c:
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver[0]) == 5
+        assert int(ver[0]) == 6
 
 
 # ---------- delete_concept ----------
@@ -627,7 +626,7 @@ def test_write_concept_derives_links_from_body_wikilinks(db: Path, staged_source
     from corpus.storage import update_concept
     update_concept(
         db, slug="a",
-        body="see [[proc-cpuinfo]] and [[lscpu]] (also [[proc-cpuinfo|alias]])",
+        body="see [[proc-cpuinfo]] and [[lscpu]] (also [[proc-cpuinfo|alias]])"
     )
     info = read_concept(db, "a")
     assert sorted(info["links"]) == ["lscpu", "proc-cpuinfo"], info["links"]
@@ -651,7 +650,7 @@ def test_write_concept_body_wikilink_skips_unsafe_and_empty(db: Path, staged_sou
             "[[proc-cpuinfo]]  dup (去重) "
             "[[lscpu|alias]]   alias 形式取 slug"
         ),
-        extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}]
     )
     info = read_concept(db, "x")
     # 跳过: empty / self-ref / dup (per _extract_wikilinks dedup 逻辑)
@@ -1106,7 +1105,7 @@ def test_migration_v4_to_v5_adds_status_aliases_tags(tmp_path: Path):
 
     with sqlite3.connect(str(db_path)) as c:
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver[0]) == 5
+        assert int(ver[0]) == 6
         # v5 新列存在
         cols = [r[1] for r in c.execute("PRAGMA table_info(concepts)").fetchall()]
         assert "status" in cols
@@ -1119,7 +1118,7 @@ def test_migration_v4_to_v5_adds_status_aliases_tags(tmp_path: Path):
     # 验 schema_version 升到 4
     with sqlite3.connect(str(db_path)) as c:
         ver = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        assert int(ver[0]) == 5
+        assert int(ver[0]) == 6
         # ingest_log 表存在
         log_ingest(db_path, op="stage", source_id="post-mig", actor="test", status="ok")
         c.row_factory = sqlite3.Row
@@ -1314,8 +1313,7 @@ def test_restore_from_files_basic(tmp_path: Path):
     raw_path = vault / "raw" / "test-ingest-20260820-150000.md"
     write_source_file(
         vault, raw_path,
-        source_id="abc123def4560000",
-        original_filename="test.md", content_hash="abc", size_bytes=10,
+        source_id="abc123def4560000", content_hash="abc", size_bytes=10,
         status="staged", body="# Test content")
 
     # 2. 写 wiki/concept/<slug>.md (frontmatter 含 sources / links / version / etc)
@@ -1353,7 +1351,6 @@ def test_restore_from_files_basic(tmp_path: Path):
 
     src_info = read_source(vault / ".wiki-meta" / "corpus.db", "abc123def4560000")
     assert src_info is not None
-    assert src_info["original_filename"] == "test.md"
     assert src_info["content_hash"] == "abc"
 
 
@@ -1373,7 +1370,7 @@ def test_restore_from_files_dry_run(tmp_path: Path):
     raw_path = vault / "raw" / "x.md"
     write_source_file(
         vault, raw_path,
-        source_id="x" * 16, original_filename="x.md",
+        source_id="x" * 16,
         content_hash="x", size_bytes=1, status="staged", body="x")
     write_concept_file(vault, slug="c", title="C", body="b",
                       source_ids=["x" * 16], version=0)
@@ -1506,7 +1503,7 @@ def test_write_source_wiki_page_uses_slug_filename(tmp_path: Path):
     from corpus.storage import write_source_wiki_page, read_source_file
     p = write_source_wiki_page(
         tmp_path, "abc123def4560001", slug="postgresql-13",
-        content_hash="abc123de", original_filename="PostgreSQL 13.md",
+        content_hash="abc123de",
         size_bytes=100, status="staged")
     assert p.name == "postgresql-13.md"
     assert p.parent.name == "source"
@@ -1555,16 +1552,14 @@ def test_update_source_page_concepts_writes_only_section(tmp_path: Path):
     src = stage_source(
         db_path,
         raw_path=tmp_path / "raw" / "article.md",
-        content="# Article\n\nbody content here\n",
-        original_filename="article.md")
+        content="# Article\n\nbody content here\n")
     sid = src["source_id"]
 
     # 故意模拟「历史数据 / 误用」: wiki/source 写了带原文的 body.
     # 这是 cleanup 之前可能出现的状态. sync 应该自动清掉.
     src_path = write_source_wiki_page(
         tmp_path, sid, slug="article-test",
-        content_hash=src["content_hash"],
-        original_filename="article.md", size_bytes=src["size_bytes"],
+        content_hash=src["content_hash"], size_bytes=src["size_bytes"],
         status="staged")
     # 手动注入原文污染 frontmatter 外的 body (模拟历史 bug 残留)
     from corpus.storage import _write_md, _read_md, _build_concepts_extracted_section
@@ -1691,7 +1686,7 @@ def test_build_concepts_extracted_section_table_format(tmp_path: Path):
     src = stage_source(
         db_path,
         raw_path=tmp_path / "raw" / "art.md",
-        content="x", original_filename="art.md")
+        content="x")
     sid = src["source_id"]
 
     # 3 个 extraction: 1) 普通; 2) 含 pipe; 3) 含换行.

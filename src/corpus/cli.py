@@ -152,14 +152,19 @@ def _humanize_one(item) -> str:
 
 
 def _resolve_db(vault_root: Path, *, ensure_vault_dir: bool = True):
-    """解析 vault 路径，返回 db_path (不带锁, 适用于 read-only 命令)."""
+    """解析 vault 路径, 返回 db_path.
+
+    每次都跑 init_db (幂等): 没 DB 就 CREATE, 有 DB 但 schema_version 旧就跑
+    migration. 这样 CLI 任一命令都会按需升级, 用户不用单独跑 `corpus vault
+    upgrade`. init_db 自身 cheap (1 个 SELECT schema_meta + 必要时 ALTER), 不
+    影响读性能.
+    """
     if not vault_root.exists():
         _err(f"vault does not exist: {vault_root}", hint="run `corpus vault init <path>` first")
     if ensure_vault_dir:
         ensure_vault(vault_root)
     paths = vault_paths(vault_root)
-    if not is_initialized(paths["corpus_db"]):
-        init_db(paths["corpus_db"])
+    init_db(paths["corpus_db"])  # idempotent + auto-migrate
     return paths
 
 
@@ -201,7 +206,6 @@ def _ingest_one_source(
         paths["corpus_db"],
         raw_path=raw_path,
         content=content,
-        original_filename=canonical.name,
         revive_on_deleted=force_revive,
     )
 
@@ -215,7 +219,6 @@ def _ingest_one_source(
             paths["root"],
             raw_path,
             source_id=result["source_id"],
-            original_filename=canonical.name,
             content_hash=result["content_hash"],
             size_bytes=result["size_bytes"],
             status="staged",
@@ -239,7 +242,6 @@ def _ingest_one_source(
             paths["root"],
             source_id=result["source_id"],
             slug=slug,
-            original_filename=canonical.name,
             content_hash=result["content_hash"],
             size_bytes=result["size_bytes"],
             status="staged",
