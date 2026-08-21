@@ -1781,3 +1781,213 @@ def test_build_concepts_extracted_section_empty_db(tmp_path: Path):
     init_db(db_path)
     s2 = _build_concepts_extracted_section(tmp_path, "still-no-source", body="")
     assert "_(none yet)_" in s2
+
+
+# ---------- link_extraction (fold of add-source + extraction-id UPDATE) ----------
+def test_link_extraction_inserts_new_row(db: Path, staged_source: str):
+    """link without --extraction-id INSERTs a new extractions row."""
+    from corpus.storage import write_concept, link_extraction, read_concept
+    write_concept(
+        db, slug="c", title="C", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q1"}],
+    )
+    res = link_extraction(db, "c", staged_source, quote_span="q2 (new)")
+    assert res["action"] == "inserted"
+    assert res["slug"] == "c"
+    assert res["extraction_id"].startswith("e_")
+    assert staged_source in res["source_ids"]
+
+
+def test_link_extraction_allows_multiple_per_concept_source(db: Path, staged_source: str):
+    """同一 (concept, source) 多条 extractions 允许 (不像 UNIQUE 强约束)。"""
+    from corpus.storage import write_concept, link_extraction
+    write_concept(
+        db, slug="c", title="C", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q1"}],
+    )
+    r1 = link_extraction(db, "c", staged_source, quote_span="q2")
+    r2 = link_extraction(db, "c", staged_source, quote_span="q3")
+    assert r1["extraction_id"] != r2["extraction_id"]
+    import sqlite3
+    n = sqlite3.connect(str(db)).execute(
+        "SELECT COUNT(*) AS n FROM extractions WHERE concept_slug='c'"
+    ).fetchone()[0]
+    assert n == 3
+
+
+def test_link_extraction_with_extraction_id_updates_existing(db: Path, staged_source: str):
+    """link --extraction-id X 复用现有 row, UPDATE quote_span + 时间戳。"""
+    from corpus.storage import write_concept, link_extraction, read_concept
+    write_concept(
+        db, slug="c", title="C", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "old"}],
+    )
+    from corpus.storage import read_concept
+    info_pre = read_concept(db, "c")
+    import sqlite3
+    ext_id = sqlite3.connect(str(db)).execute(
+        "SELECT extraction_id FROM extractions WHERE concept_slug='c'"
+    ).fetchone()[0]
+
+    res = link_extraction(
+        db, "c", staged_source, quote_span="replaced",
+        extraction_id=ext_id,
+    )
+    assert res["action"] == "updated"
+    assert res["extraction_id"] == ext_id
+    # quote_span 真改了
+    q = sqlite3.connect(str(db)).execute(
+        "SELECT quote_span FROM extractions WHERE extraction_id=?", (ext_id,),
+    ).fetchone()[0]
+    assert q == "replaced"
+    # 单条还在 (没插入新 row)
+    n = sqlite3.connect(str(db)).execute(
+        "SELECT COUNT(*) AS n FROM extractions WHERE concept_slug='c'"
+    ).fetchone()[0]
+    assert n == 1
+
+
+def test_link_extraction_rejects_wrong_extraction_id(db: Path, staged_source: str):
+    """extraction_id 错slug 或 错source 应报错 (防 silently 改别的概念)。"""
+    from corpus.storage import write_concept, link_extraction, read_concept
+    write_concept(
+        db, slug="c1", title="C1", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
+    )
+    import sqlite3
+    ext_id = sqlite3.connect(str(db)).execute(
+        "SELECT extraction_id FROM extractions WHERE concept_slug='c1'"
+    ).fetchone()[0]
+    # slug 错
+    try:
+        link_extraction(db, "c2", staged_source, quote_span="x", extraction_id=ext_id)
+        assert False, "should raise"
+    except Exception:
+        pass
+
+
+# ---------- unlink_extraction (fold of remove-source + remove-extraction) ----------
+def test_unlink_extraction_by_extraction_id(db: Path, staged_source: str):
+    from corpus.storage import write_concept, link_extraction, unlink_extraction
+    write_concept(
+        db, slug="c", title="C", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q1"}],
+    )
+    e2 = link_extraction(db, "c", staged_source, quote_span="q2")
+    res = unlink_extraction(db, "c", extraction_id=e2["extraction_id"])
+    assert res["deleted"] is True
+    import sqlite3
+    n = sqlite3.connect(str(db)).execute(
+        "SELECT COUNT(*) AS n FROM extractions WHERE concept_slug='c'"
+    ).fetchone()[0]
+    assert n == 1  # only q1 remains
+
+
+def test_unlink_extraction_by_source_removes_all(db: Path, staged_source: str):
+    from corpus.storage import write_concept, link_extraction, unlink_extraction
+    write_concept(
+        db, slug="c", title="C", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q1"}],
+    )
+    link_extraction(db, "c", staged_source, quote_span="q2")
+    unlink_extraction(db, "c", source_id=staged_source)
+    import sqlite3
+    n = sqlite3.connect(str(db)).execute(
+        "SELECT COUNT(*) AS n FROM extractions WHERE concept_slug='c'"
+    ).fetchone()[0]
+    assert n == 0
+
+
+def test_unlink_extraction_requires_source_or_extraction_id(db: Path, staged_source: str):
+    from corpus.storage import write_concept, unlink_extraction
+    write_concept(
+        db, slug="c", title="C", body="b",
+        extractions_data=[{"source_id": staged_source, "quote_span": "q"}],
+    )
+    import pytest
+    with pytest.raises(Exception):
+        unlink_extraction(db, "c")
+    with pytest.raises(Exception):
+        unlink_extraction(db, "c", source_id=staged_source, extraction_id="e_x")
+
+
+# ---------- mark_source_state (替代 commit_source + 通用化) ----------
+def test_mark_source_state_staged_to_committed(db: Path):
+    from corpus.storage import stage_source, mark_source_state
+    res = stage_source(
+        db, raw_path=Path("/tmp/raw/a.md"), content="x", original_filename=None or "a.md"
+    ) if False else stage_source(db, raw_path=Path("/tmp/raw/a.md"), content="x")
+    sid = res["source_id"]
+    out = mark_source_state(db, sid, new_status="committed")
+    assert out["status"] == "committed"
+    assert out["old_status"] == "staged"
+    assert out["noop"] is False
+    # updated_at 是 ISO 时间戳 (不保证含字段名)
+    assert out["updated_at"]
+
+
+def test_mark_source_state_to_deleted_then_back_to_staged(db: Path):
+    from corpus.storage import stage_source, mark_source_state
+    res = stage_source(db, raw_path=Path("/tmp/raw/a.md"), content="x")
+    sid = res["source_id"]
+    o1 = mark_source_state(db, sid, new_status="deleted", reason="oops")
+    assert o1["status"] == "deleted"
+    o2 = mark_source_state(db, sid, new_status="staged")
+    assert o2["status"] == "staged"
+    assert o2["old_status"] == "deleted"
+
+
+def test_mark_source_state_invalid_status_rejected(db: Path):
+    from corpus.storage import stage_source, mark_source_state
+    from corpus.errors import StorageError
+    res = stage_source(db, raw_path=Path("/tmp/raw/a.md"), content="x")
+    sid = res["source_id"]
+    try:
+        mark_source_state(db, sid, new_status="bogus")
+        assert False, "should raise"
+    except StorageError:
+        pass
+
+
+def test_mark_source_state_noop_when_same_status(db: Path):
+    from corpus.storage import stage_source, mark_source_state
+    res = stage_source(db, raw_path=Path("/tmp/raw/a.md"), content="x")
+    sid = res["source_id"]
+    out = mark_source_state(db, sid, new_status="staged")
+    assert out["noop"] is True
+    assert out["status"] == "staged"
+
+
+# ---------- vault_inspect (替代 vault info + vault stats) ----------
+def test_vault_inspect_returns_combined_info_stats(tmp_path: Path):
+    from corpus.storage import init_db, stage_source, write_concept, vault_inspect, commit_source
+    v = tmp_path / "vault"
+    (v / "raw").mkdir(parents=True)
+    init_db(v / ".wiki-meta" / "corpus.db")
+    # empty vault
+    info = vault_inspect(v / ".wiki-meta" / "corpus.db")
+    assert info["db_initialized"] is True
+    assert info["schema_version"] >= 6
+    assert info["concepts"]["total"] == 0
+    assert info["sources"]["total"] == 0
+    # add some + check counts
+    res = stage_source(v / ".wiki-meta" / "corpus.db", raw_path=v / "raw" / "x.md", content="x")
+    sid = res["source_id"]
+    write_concept(
+        v / ".wiki-meta" / "corpus.db", slug="k", title="K", body="b",
+        extractions_data=[{"source_id": sid, "quote_span": "q"}],
+    )
+    info2 = vault_inspect(v / ".wiki-meta" / "corpus.db")
+    assert info2["concepts"]["total"] == 1
+    assert info2["sources"]["total"] == 1
+    assert info2["sources"]["by_status"].get("staged") == 1
+
+
+def test_vault_inspect_raises_on_missing_db(tmp_path: Path):
+    from corpus.storage import vault_inspect
+    from corpus.errors import StorageError
+    try:
+        vault_inspect(tmp_path / "nope.db")
+        assert False, "should raise"
+    except StorageError:
+        pass

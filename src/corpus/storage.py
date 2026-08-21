@@ -2494,3 +2494,297 @@ def export_index(db_path: Path, wiki_index_dir: Path) -> dict[str, Any]:
         "concepts_count": len(concepts_data),
         "sources_count": len(sources_data),
     }
+
+
+
+# ============================================================================
+# Stage 2 rename + fold wrappers
+# ============================================================================
+# 这些是 ingest 工作流简化阶段新增的 façade functions:
+# - link_extraction: 替代 add_source_to_concept + 在 --extraction-id 模式下 UPDATE 现有 extraction
+# - unlink_extraction: 替代 remove_source_from_concept (粗粒度按 source) +
+#   remove_extraction (细粒度按 extraction_id)
+# - mark_source_state: 替代 commit_source, 通用 status 转换
+# - vault_inspect: 替代 vault info + vault stats, 一次返回 vault 健康度全套
+# 旧函数保留为 legacy alias (被 CLI rename 后老名字 redirect 调用).
+
+
+def link_extraction(
+    db_path: Path,
+    slug: str,
+    source_id: str,
+    *,
+    quote_span: str,
+    extraction_id: str | None = None,
+    prompt_version: str | None = None,
+    extracted_by: str = "agent",
+    confidence: float | None = None,
+    char_start: int | None = None,
+    char_end: int | None = None,
+) -> dict[str, Any]:
+    """链接 source → concept, 支持 INSERT 新 extraction 或 UPDATE 现有 extraction.
+
+    语义 (fold of add_source_to_concept + --extraction-id UPDATE):
+      - 不传 extraction_id:  INSERT 新 extractions 行 (允许多 evidence per (concept, source))
+      - 传 extraction_id:     UPDATE 现有 row 的 quote_span + 抽取元数据. extraction_id 必须属此 (slug, source_id)
+
+    Returns: {slug, extraction_id, source_ids, is_orphan, action: 'inserted' | 'updated'}
+    Raises: StorageError (concept/source/extraction not found, slug 失配)
+    """
+    if not quote_span or not quote_span.strip():
+        raise StorageError("quote_span is required")
+    if extraction_id:
+        now = _utc_now_iso()
+        with connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT concept_slug, source_id FROM extractions WHERE extraction_id=?",
+                (extraction_id,),
+            ).fetchone()
+            if not row:
+                raise StorageError(f"extraction not found: {extraction_id}")
+            if row["concept_slug"] != slug:
+                raise StorageError(
+                    f"extraction {extraction_id} belongs to slug {row['concept_slug']!r}, not {slug!r}",
+                )
+            if row["source_id"] != source_id:
+                raise StorageError(
+                    f"extraction {extraction_id} belongs to source_id {row['source_id']!r}, not {source_id!r}",
+                )
+            conn.execute(
+                """UPDATE extractions
+                SET quote_span=?, extracted_at=?, extracted_by=?, prompt_version=?, confidence=?
+                WHERE extraction_id=?""",
+                (quote_span, now, extracted_by, prompt_version, confidence, extraction_id),
+            )
+            crow = conn.execute(
+                "SELECT source_ids, is_orphan FROM concepts WHERE slug=?", (slug,),
+            ).fetchone()
+            return {
+                "slug": slug,
+                "extraction_id": extraction_id,
+                "source_ids": _parse_json_list(crow["source_ids"]),
+                "is_orphan": bool(crow["is_orphan"]),
+                "action": "updated",
+            }
+    return {
+        **add_source_to_concept(
+            db_path,
+            slug,
+            source_id,
+            quote_span=quote_span,
+            prompt_version=prompt_version,
+            extracted_by=extracted_by,
+            confidence=confidence,
+            char_start=char_start,
+            char_end=char_end,
+        ),
+        "action": "inserted",
+    }
+
+
+def unlink_extraction(
+    db_path: Path,
+    slug: str,
+    *,
+    source_id: str | None = None,
+    extraction_id: str | None = None,
+) -> dict[str, Any]:
+    """解链 concept ↔ source (粗粒度 + 细粒度合并).
+
+    互斥且必传其一:
+      - --extraction-id X:  删单条 extraction row + sync concept.source_ids if no remaining referrers
+      - --source SID:        删该 (concept, source_id) 全部 extractions + source_ids 移除
+
+    不传或同传都报错.
+
+    Returns 取决于 mode:
+      - extraction_id mode: dict 来自 remove_extraction()
+      - source mode: {"slug", "deleted_extractions": N, "source_ids": [...], "is_orphan": bool}
+    """
+    if source_id is not None and extraction_id is not None:
+        raise StorageError(
+            "--source 和 --extraction-id 互斥, 只传一个",
+            hint="--extraction-id 撤单条 row; --source 撤该 source 的全部 row",
+        )
+    if source_id is None and extraction_id is None:
+        raise StorageError(
+            "must specify --source or --extraction-id",
+            hint="--extraction-id 撤单条 row; --source 撤该 source 的全部 row",
+        )
+    if extraction_id is not None:
+        return remove_extraction(db_path, extraction_id)
+
+    # source mode — 删所有 matching extractions + 清 concept.source_ids
+    now = _utc_now_iso()
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT source_ids FROM concepts WHERE slug=?", (slug,)
+        ).fetchone()
+        if not row:
+            raise StorageError(f"concept not found: {slug}")
+        old_ids = set(_parse_json_list(row["source_ids"]))
+        if source_id not in old_ids:
+            return {
+                "slug": slug,
+                "deleted_extractions": 0,
+                "source_ids": sorted(old_ids),
+                "is_orphan": len(old_ids) == 0,
+            }
+        del_cur = conn.execute(
+            "DELETE FROM extractions WHERE concept_slug=? AND source_id=?",
+            (slug, source_id),
+        )
+        old_ids.discard(source_id)
+        is_orphan = 1 if not old_ids else 0
+        conn.execute(
+            "UPDATE concepts SET source_ids=?, is_orphan=?, updated_at=? WHERE slug=?",
+            (json.dumps(sorted(old_ids)), is_orphan, now, slug),
+        )
+    return {
+        "slug": slug,
+        "deleted_extractions": del_cur.rowcount,
+        "source_ids": sorted(old_ids),
+        "is_orphan": is_orphan == 1,
+    }
+
+
+_SOURCES_STATE_VALUES = ("staged", "committed", "deleted")
+
+
+def mark_source_state(
+    db_path: Path,
+    source_id: str,
+    *,
+    new_status: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """通用化 source 状态切换 (替代 commit_source 单向 staged→committed).
+
+    new_status 必传, 在 (_SOURCES_STATE_VALUES) 三态内:
+      - 'staged':     清 committed_at / deleted_at / deleted_reason (重新入库场景)
+      - 'committed':  设 committed_at
+      - 'deleted':    设 deleted_at + deleted_reason (软删; 不级联)
+
+    idempotent on no-op (old == new 不改 row, 返 noop=True).
+    """
+    if new_status not in _SOURCES_STATE_VALUES:
+        raise StorageError(
+            f"new_status must be one of {_SOURCES_STATE_VALUES}, got {new_status!r}",
+        )
+    now = _utc_now_iso()
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT status FROM sources WHERE source_id=?",
+            (source_id,),
+        ).fetchone()
+        if not row:
+            raise StorageError(f"source not found: {source_id}")
+        old_status = row["status"]
+        if old_status == new_status:
+            return {
+                "source_id": source_id,
+                "old_status": old_status,
+                "status": new_status,
+                "noop": True,
+            }
+        if new_status == "committed":
+            conn.execute(
+                "UPDATE sources SET status=?, committed_at=? WHERE source_id=?",
+                (new_status, now, source_id),
+            )
+        elif new_status == "deleted":
+            conn.execute(
+                "UPDATE sources SET status=?, deleted_at=?, deleted_reason=? WHERE source_id=?",
+                (new_status, now, reason, source_id),
+            )
+        else:  # 'staged' — re-staging clears committed_at / deleted_at
+            conn.execute(
+                """UPDATE sources
+                SET status=?, committed_at=NULL, deleted_at=NULL, deleted_reason=NULL
+                WHERE source_id=?""",
+                (new_status, source_id),
+            )
+    return {
+        "source_id": source_id,
+        "old_status": old_status,
+        "status": new_status,
+        "noop": False,
+        "updated_at": now,
+        "reason": reason,
+    }
+
+
+def vault_inspect(db_path: Path) -> dict[str, Any]:
+    """vault 健康度全套 (替代 vault info + vault stats 双查).
+
+    返回:
+      - paths / db_initialized: 是否就绪
+      - has_sources / has_concepts: 是否非空
+      - total_concepts / certified / uncertified / orphans / avg_score / score_distribution
+      - total_sources / sources_by_status
+      - schema_version / unmet_count: schema + 孤立 source (有 DB row 但 raw_path 文件不在)
+    """
+    from .errors import StorageError
+
+    if not db_path.exists():
+        raise StorageError(f"vault not initialized: {db_path.parent}", hint="run `corpus vault init <path>` first")
+
+    with connect(db_path) as conn:
+        ver_row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        schema_version = int(ver_row["value"]) if ver_row else 0
+
+        # concepts — separate aggregate queries (avoid subquery alias scope)
+        cnt = conn.execute("SELECT COUNT(*) AS n FROM concepts").fetchone()["n"]
+        cer = conn.execute(
+            "SELECT COUNT(*) AS n FROM concepts WHERE certified_at IS NOT NULL"
+        ).fetchone()["n"]
+        unc = conn.execute(
+            "SELECT COUNT(*) AS n FROM concepts WHERE certified_at IS NULL"
+        ).fetchone()["n"]
+        orp = conn.execute(
+            "SELECT COUNT(*) AS n FROM concepts WHERE is_orphan = 1"
+        ).fetchone()["n"]
+        avg_row = conn.execute(
+            "SELECT AVG(certified_score) AS a FROM concepts WHERE certified_score IS NOT NULL"
+        ).fetchone()
+        avg = avg_row["a"] if avg_row else None
+        score_buckets_row = conn.execute(
+            """SELECT
+                SUM(CASE WHEN certified_score IS NULL THEN 1 ELSE 0 END) AS no_score,
+                SUM(CASE WHEN certified_score < 0.5 THEN 1 ELSE 0 END) AS lt_0_5,
+                SUM(CASE WHEN certified_score >= 0.5 AND certified_score < 0.7 THEN 1 ELSE 0 END) AS mid_0_5_0_7,
+                SUM(CASE WHEN certified_score >= 0.7 AND certified_score < 0.9 THEN 1 ELSE 0 END) AS mid_0_7_0_9,
+                SUM(CASE WHEN certified_score >= 0.9 THEN 1 ELSE 0 END) AS ge_0_9
+            FROM concepts"""
+        ).fetchone()
+
+        # sources by status
+        s_rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM sources GROUP BY status"
+        ).fetchall()
+        sources_by_status = {r["status"]: r["n"] for r in s_rows}
+
+    return {
+        "db_initialized": True,
+        "schema_version": schema_version,
+        "concepts": {
+            "total": cnt or 0,
+            "certified": cer or 0,
+            "uncertified": unc or 0,
+            "orphans": orp or 0,
+            "avg_score": round(avg, 4) if avg is not None else None,
+            "score_distribution": {
+                "no_score": score_buckets_row["no_score"] or 0,
+                "<0.5": score_buckets_row["lt_0_5"] or 0,
+                "0.5-0.7": score_buckets_row["mid_0_5_0_7"] or 0,
+                "0.7-0.9": score_buckets_row["mid_0_7_0_9"] or 0,
+                "≥0.9": score_buckets_row["ge_0_9"] or 0,
+            },
+        },
+        "sources": {
+            "total": sum(sources_by_status.values()),
+            "by_status": sources_by_status,
+        },
+    }
