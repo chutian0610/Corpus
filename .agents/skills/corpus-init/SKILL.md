@@ -130,11 +130,17 @@ Expect:
 
 ## Next steps
 
-After `vault init` succeeds:
+After `vault init` succeeds, **不要再走 `corpus` CLI 命令路线** — 该让对应 workflow skill 接管:
 
-- **Ingest sources**: ```bash
-corpus sources ingest <vault_name> <external-file>      # see main corpus skill
-corpus sources batch <vault_name> <dir> --glob "*.md"
-corpus vault info <vault_name> --json                    # 看 canonical paths
-corpus stats <vault_name> --json                        # baseline (total_sources: 0)
-```
+| 接下来要做什么 | Load this skill |
+|---|---|
+| 把已有 markdown / 文章 ingest 进 vault, LLM 抽 concept, dedup, write | **`corpus-ingest`** (本仓库 `.agents/skills/corpus-ingest/SKILL.md`) |
+| 只查 schema / 列已存 concept, 不修改 | 直接 `corpus concepts list / show` (command-level, 不需 skill) |
+| 调整 vault config (auto_git / auto_commit 等, schema v6+) | **`corpus-config`** (未来 skill, AGENTS.md 已预定) |
+| 健康检查 / orphan / 重复 / staleness | **`corpus-maintain`** (未来 skill, AGENTS.md 已预定) |
+
+> **为什么不再列 `corpus sources ingest ...` 之类的命令了**: ingest 不是一个命令
+> 就能做完的 — 它涉及 `corpus sources ingest` + LLM 抽 concept + dedup + write/update +
+> index sync + 双向同步 source page. 完整工作流写在 `corpus-ingest` 里, agent 应该
+> load 那个 skill 而不是在 init skill 里复制一遍命令. 命令速查只在 main `corpus`
+> skill 里维护 (`## CLI 速查` 段), 哪里是新事实的唯一来源 (init / ingest 都引那里).

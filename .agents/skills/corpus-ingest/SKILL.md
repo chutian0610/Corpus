@@ -181,15 +181,17 @@ elif result[0]["match_score"] >= 0.9:
 corpus concepts write <vault> \
   --slug postgresql-mvcc \
   --title "PostgreSQL MVCC" \
-  --body "<按内容自选的 prose + wikilink>" \
+  --body "<按内容自选的 prose, body 里含 [[wal]] [[transaction-isolation]] 表达 outgoing links>" \
   --extractions '[{"source_id":"abc123","quote_span":"..."}]' \
-  --links wal,transaction-isolation \
   --prompt-version extract-v1 \
   --status evergreen \
   --aliases "MVCC,多版本并发" \
   --tags "concept,database" \
   --json
 ```
+
+> outgoing links 不再传 `--links` — corpus 从 body 里的 `[[wikilinks]]` 自动派生 (Obsidian
+> 兼容). 想添链接 → 在 body 里写 `[[target-slug]]`. 详见 corpus SKILL 错误处理段.
 
 slug 已存在 → 抛 `ConflictError`. **业务决策 (merge body / 保留哪些 source) 不应 storage 静默做, 由 LLM 决定**.
 LLM 重新走 dedup 流程: find-by-link + read + merge + update_concept (5b).
@@ -203,9 +205,8 @@ v=$(corpus concepts show <vault> postgresql-mvcc --json | jq .version)
 
 # 3. 提交 with CAS (覆盖 body / source_ids / status, 不动其他字段)
 corpus concepts update <vault> postgresql-mvcc \
-  --body "<merged>" \
+  --body "<merged 内含 [[related-concept]] 自动派生 outgoing link>" \
   --add-extractions '[{"source_id":"new_sid","quote_span":"..."}]' \
-  --add-links "related-concept" \
   --status stale \
   --expected-version $v \
   --json
@@ -306,7 +307,6 @@ for sid in $(corpus sources list ~/my-wiki --json | jq -r '.[].source_id'); do
       corpus concepts write ~/my-wiki \
         --slug $slug --title "$(echo "$c" | jq -r .title)" --body "$(echo "$c" | jq -r .body)" \
         --extractions "$(echo "$c" | jq -c .extractions)" \
-        --links "$(echo "$c" | jq -r '.links | join(",")')" \
         --json
     fi
   done
@@ -316,6 +316,23 @@ done
 corpus stats ~/my-wiki --json
 corpus audit ~/my-wiki --op stage --limit 20
 ```
+
+## Next steps
+
+Ingest 跑完之后, **不要再列 `corpus` 命令让 agent 自己跑** — 该让对应 workflow skill 接管:
+
+| 接下来要做什么 | Load this skill |
+|---|---|
+| 查 schema / list 已存 concept, 不改 | 直接 `corpus concepts list / show` (command-level) |
+| 健康检查 / orphan / 重复 / staleness / 修 concept | **`corpus-maintain`** (未来 skill, AGENTS.md 已预定) |
+| 认证 / 评分 (certify) | 主 `corpus` skill (`## CLI 速查` 段) |
+| 调 vault config (auto_git / auto_commit 等) | **`corpus-config`** (未来 skill, AGENTS.md 已预定) |
+| 跨电脑 restore (`corpus restore-from-files`) | 主 `corpus` skill (`## CLI 速查` 段) |
+| 翻 ingest_log (audit) | `corpus audit` (command-level) |
+
+> 命令速查只在主 `corpus` skill 维护一份 — ingest / init / maintain 都引那边,
+> 别在每个子 skill 里复制一遍命令表. 这是 single source of truth 原则.
+
 
 ## Out of scope
 
