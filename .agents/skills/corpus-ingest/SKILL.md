@@ -10,15 +10,18 @@ description: >
   
   Covers the full pipeline:
     1. Pre-flight: vault 已 init (corpus-init skill), git 在 PATH
-    2. sources ingest / batch (raw_path 自动 <stem>-ingest-<UTC>.<ext>)
+    2. sources ingest / batch (raw_path 自动 <stem>-ingest-<UTC>.<ext>, 同时写 wiki/source/<slug>.md)
     3. 对每个 source_id, Read raw/<file> 抽取概念
-    4. corpus concepts find-by-link 查 dedup (match_score >= 0.9 → 已存在)
-    5. corpus concepts write (新) / update --expected-version (已有, 防覆盖丢失)
-    6. corpus index sync (写/update 时已自动 export_index, 兜底手动跑)
+    4. corpus concepts find-by-link 查 dedup (match_score >= 0.9 → 已存在, 也匹配 aliases)
+    5a. corpus concepts write (新, --status/--aliases/--tags 可选) — slug 撞抛 ConflictError
+    5b. corpus concepts update (已有, --expected-version CAS 防 race) — 含 body / source_ids / status 合并
+    5c. corpus concepts add-source (只加新 source 到已有 concept, 不动 body)
+    5d. corpus concepts remove-source / remove-extraction (从已有 concept 删 source 或撤抽取)
+    6. corpus index sync (写/update/add-source 时已自动 export_index, 兜底手动跑)
   
   Not for: vault setup (→ corpus-init), config (→ corpus-config), audit log (→ corpus skill), 
-  maintenance (→ corpus-maintain, 未来). Multi-agent 并发: write_concept 是 idempotent upsert, 
-  update_concept 支持 --expected-version CAS.
+  maintenance (→ corpus-maintain, 未来). Multi-agent 并发: write_concept 严格 INSERT (slug 撞抛 ConflictError), 
+  update_concept 支持 --expected-version CAS (race-safe).
 ---
 
 # corpus-ingest — 完整入库工作流
@@ -106,18 +109,37 @@ LLM 返回结构:
 }
 ```
 
-## Step 3 — Dedup 检查 (find-by-link)
+## Step 3 — Dedup 检查 (find-by-link / dedup-candidates)
 
-每个 candidate slug 跑 `find-by-link` 看是否已存在:
-
+**find-by-link** (单 slug 查询):
 ```bash
 corpus concepts find-by-link <vault> <candidate-slug> --json
 ```
 
-返回 match_score 排序的候选:
+返回 match_score 排序的候选 (slug + title + match_score):
 - `score >= 0.9`: 高度相似, 大概率是同一 concept → 走 `concepts update` 路径
 - `score 0.4-0.9`: 部分相关, 仔细看 candidate 决定 merge 还是新写
 - `score 0` (空数组): 没相关, 走 `concepts write` 路径
+
+**5 维匹配** (schema v5+):
+| 维度 | 分值 |
+|---|---|
+| slug exact match | 1.0 |
+| alias exact match (schema v5) | 0.95 |
+| slug startswith | 0.9 |
+| alias partial match | 0.6 |
+| slug contains (substring) | 0.5 |
+| title contains (case-insensitive) | 0.4 |
+| difflib.SequenceMatcher (fuzzy) | 0-0.3 bonus |
+
+Aliases 让 'MVCC' / '多版本并发' / 'PG' 都能映射到 postgresql-mvcc.
+
+**dedup-candidates** (多维度分数, 给 LLM 二次判断):
+```bash
+corpus concepts dedup-candidates <vault> <slug> [--limit N]
+```
+
+返每个 candidate 的 discrete / fuzzy / length_diff 分数, 让 LLM 看 'score=0.7' 怎么来的 (discrete 0.4 + fuzzy 0.3 vs discrete 0.9 + fuzzy 0.0 含义不同) 决定是否 merge.
 
 ```python
 result = json.loads(subprocess.run(["corpus", "concepts", "find-by-link", vault, slug, "--json"], ...).stdout)
@@ -132,7 +154,7 @@ elif result[0]["match_score"] >= 0.9:
 
 ## Step 4 — Write / Update concept (write_concept 严格 INSERT, update_concept CAS)
 
-**新 concept (write_concept, 严格 INSERT)**:
+**5a. 新 concept (write_concept, 严格 INSERT)** (schema v5):
 
 ```bash
 corpus concepts write <vault> \
@@ -142,30 +164,51 @@ corpus concepts write <vault> \
   --extractions '[{"source_id":"abc123","quote_span":"..."}]' \
   --links wal,transaction-isolation \
   --prompt-version extract-v1 \
+  --status evergreen \
+  --aliases "MVCC,多版本并发" \
+  --tags "concept,database" \
   --json
 ```
 
-slug 已存在 → 抛 `ConflictError`. **业务决策 (merge body / 保留哪些 source) 不应 storage 静默做, 由 LLM 决定**. 
-LLM 重新走 dedup 流程: find-by-link + read + merge + update_concept.
+slug 已存在 → 抛 `ConflictError`. **业务决策 (merge body / 保留哪些 source) 不应 storage 静默做, 由 LLM 决定**.
+LLM 重新走 dedup 流程: find-by-link + read + merge + update_concept (5b).
 
-**已有 concept (update_concept with CAS)**: 防 multi-agent 覆盖丢失.
+**5b. 已有 concept (update_concept with CAS)** (schema v3+): 防 multi-agent 覆盖丢失.
 ```bash
 # 1. 读当前 version
 v=$(corpus concepts show <vault> postgresql-mvcc --json | jq .version)
 
 # 2. agent 自己做 merge (current body + LLM 新内容)
 
-# 3. 提交 with CAS
+# 3. 提交 with CAS (覆盖 body / source_ids / status, 不动其他字段)
 corpus concepts update <vault> postgresql-mvcc \
   --body "<merged>" \
   --add-extractions '[{"source_id":"new_sid","quote_span":"..."}]' \
+  --add-links "related-concept" \
+  --status stale \
   --expected-version $v \
   --json
 # 失败 → OptimisticLockError, 提示 'read_concept again, merge, then update_concept with new expected_version'
 # → 回到 1 重新 read + merge
 ```
 
-**multi-agent 并发同 slug race** (schema v3): write_concept 不静默 merge, 第二个等锁后 INSERT 撞 UNIQUE → ConflictError. LLM 重新走 find-by-link + read + merge + update_concept (--expected-version). 这是 read-modify-write 模式的典型应用, 业务决策归属 LLM.
+**5c. 加新 source 到已有 concept (add-source, 不动 body)**:
+```bash
+corpus concepts add-source <vault> postgresql-mvcc \
+  --source-id <new_sid> \
+  --quote-span "xmin/xmax from PostgreSQL docs" \
+  --prompt-version extract-v1 \
+  --json
+# 自动: source_ids set union, is_orphan=0, 写 extractions 行
+# source page (wiki/source/<slug>.md) "## Concepts extracted" 段自动反查更新
+# raw/<file>.md frontmatter 也同步写新 source (via _sync_concept_file)
+```
+
+**5d. 删 source / 撤抽取**:
+- `corpus concepts remove-source <vault> <slug> --source-id <sid>`: 从 concept.source_ids 移除 (自动 is_orphan=1, extractions 保留作 audit history)
+- `corpus concepts remove-extraction <vault> <extraction_id>`: 删单条 extractions 行 (细粒度)
+
+**multi-agent 并发同 slug race** (schema v5): write_concept 严格 INSERT 不静默 merge, 第二个等锁后 INSERT 撞 UNIQUE → ConflictError. LLM 重新走 find-by-link + read + merge + update_concept (--expected-version). 这是 read-modify-write 模式的典型应用, 业务决策归属 LLM.
 
 ## Step 5 — Index sync (自动)
 
@@ -175,12 +218,40 @@ corpus concepts update <vault> postgresql-mvcc \
 corpus index sync <vault> --json
 ```
 
-## Multi-agent 并发要点
+## Multi-agent 并发要点 (schema v5)
 
-- **不同 source + 同 concept**: write_concept 自动 upsert 合并, 不丢数据
-- **同 concept update race**: 用 --expected-version CAS, 失败重试
-- **多 agent 并行 ingest 不同 source**: SQLite WAL + busy_timeout=30s 自动串行化, raw_path unique (pick_raw_target 加 ingest timestamp), 不撞
-- **vault 跨进程互斥**: 不需要 flock (之前 flock 是过度防御, 已移除), SQLite 自己处理
+- **不同 source + 同 concept**: write_concept 严格 INSERT, slug 撞 UNIQUE → ConflictError
+  → LLM 自己读 + merge + update_concept (--expected-version CAS). 业务决策在 LLM, storage 不静默 merge
+- **同 concept update race**: 用 --expected-version CAS, OptimisticLockError 时重读重做
+- **多 agent 并行 ingest 不同 source**: SQLite WAL + busy_timeout=30s 自动串行化
+  raw_path unique (pick_raw_target 加 -ingest-<UTC> 后缀), 不撞
+- **vault 跨进程互斥**: SQLite 自己处理 (busy_timeout 等), 不需要 flock (Phase 1.5 已移除过度防御)
+
+## Source page 同步 (双向)
+
+`corpus sources ingest` / `batch` 自动写 `wiki/source/<slug>.md` (obsidian 兼容).
+slug = `slugify(original_filename)`. 重名时 pick_source_page_target 加 `-<short-hash>` 后缀.
+
+`wiki/source/<slug>.md` frontmatter 包含:
+- `source_id` (16 hex, 稳定 identifier)
+- `slug` (易读别名, 跨 vault wikilink 引用)
+- `original_filename` / `content_hash` / `size_bytes` / `status` / `created_at`
+
+`corpus concepts add-source / remove-source / remove-extraction` 反向触发 `update_source_page_concepts`:
+重写 source page 的 `## Concepts extracted from this source` 段 (从 DB extractions 表反查).
+
+## Vault 完整 self-contained (跨电脑恢复)
+
+```bash
+# 换电脑 / DB 损坏时:
+git clone <vault-repo> ~/my-vault
+cd ~/my-vault
+corpus restore-from-files .            # 从 raw/ + wiki/concept/ + wiki/source/ 重建整个 DB
+```
+
+`corpus restore-from-files` 读所有 markdown frontmatter (含 source_id / content_hash / status / aliases / tags) 重建 sources / concepts / extractions / links 表. wiki/concept/<slug>.md (含 frontmatter sources / links / certified) 也恢复.
+
+vault 完全 self-contained: `git` 是 source of truth, `.wiki-meta/corpus.db` 是 query cache, restore 重建.
 
 ## 完整例子: batch ingest 一个目录
 
