@@ -1556,6 +1556,7 @@ def write_concept(
         "slug": slug,
         "source_ids": final_source_ids,
         "extraction_ids": extraction_ids,
+        "links": links,                # body [[wikilinks]] 派生 (与 update_concept 一致)
         "created_at": now,
         "version": current_version,  # INSERT 路径下 current_version=0
     }
@@ -1724,11 +1725,15 @@ def update_concept(
                         (json.dumps(new_links), now, slug),
                     )
 
-            # 读最新 version (刚 UPDATE 多次, 拿 final)
+            # 读最新 version + links (刚 UPDATE 多次, 拿 final)
             new_version_row = conn.execute(
-                "SELECT version FROM concepts WHERE slug=?", (slug,),
+                "SELECT version, links FROM concepts WHERE slug=?", (slug,),
             ).fetchone()
             new_version = new_version_row["version"] if new_version_row else current_version
+            current_links = (
+                _parse_json_list(new_version_row["links"])
+                if new_version_row else []
+            )
 
             conn.execute("COMMIT")
         except Exception:
@@ -1739,6 +1744,7 @@ def update_concept(
         "slug": slug,
         "updated_at": now,
         "version": new_version,
+        "links": current_links,            # body 改了就重派生, 否则保留旧值
         "added_source_ids": added_source_ids,
         "extraction_ids": extraction_ids,
         "source_ids": sorted(old_source_ids),

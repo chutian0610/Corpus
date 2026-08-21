@@ -697,3 +697,135 @@ def test_sources_ingest_rolls_back_db_on_write_failure(
     with sqlite3.connect(str(vault / ".wiki-meta" / "corpus.db")) as c:
         n = c.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
         assert n == 0, f"DB 应该被回滚, 但还有 {n} 个 source"
+
+
+# ---------- --body-file: 从文件读 body (省 LLM shell 转义) ----------
+def test_concepts_write_body_file_basic(vault: Path, external: Path):
+    """--body-file 从文件读 markdown 内容, 含 shell-special chars 也能 round-trip."""
+    from corpus.storage import init_db, read_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "x.md").write_text("x content", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    # 写含特殊字符的 body 到 temp 文件
+    body_path = vault / "body.md"
+    body_path.write_text(
+        "Multi-line body with `$VAR`, `&&`, `'spaces'`, `|pipe|`, [[proc-cpuinfo]] wikilink.\n"
+        "```bash\necho 'do not expand $1'\n```\n",
+        encoding="utf-8",
+    )
+
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "bf", "--title", "BodyFile",
+        "--body-file", str(body_path),
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "q"}]),
+        "--json",
+    ])
+    assert res.exit_code == 0, res.output
+    # DB body 与文件一致
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "bf")
+    assert info["body"].startswith("Multi-line body with")
+    # shell-special chars round-trip intact (无 markdown 转义 / shell 展开)
+    assert "$1" in info["body"]
+    assert "&" in info["body"]
+    assert "|" in info["body"]
+    assert "`$VAR`" in info["body"]
+    assert "&&" in info["body"]
+    assert "'" in info["body"]
+    assert "[[proc-cpuinfo]]" in info["body"]
+    # body 派生 links 工作
+    assert "proc-cpuinfo" in info["links"]
+
+
+def test_concepts_write_body_and_body_file_mutex(vault: Path, external: Path):
+    """--body 与 --body-file 不能同时传 (两者都给时, 走我们的 exit 1 互斥检查)."""
+    from corpus.storage import init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    body_path = vault / "body.md"
+    body_path.write_text("from file", encoding="utf-8")  # 文件存在让 click.Path 通过
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "x", "--title", "X",
+        "--body", "inline",
+        "--body-file", str(body_path),
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "q"}]),
+        "--json",
+    ])
+    assert res.exit_code == 1
+    assert "互斥" in (res.stderr or "")
+
+
+def test_concepts_write_neither_body_nor_file(vault: Path, external: Path):
+    """--body / --body-file 必须传一个."""
+    from corpus.storage import init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "x", "--title", "X",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "q"}]),
+        "--json",
+    ])
+    assert res.exit_code == 1
+    assert "必须传" in (res.stderr or "")
+
+
+def test_concepts_write_body_file_not_found(vault: Path, external: Path):
+    """--body-file 不存在的文件应该报错."""
+    from corpus.storage import init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "x", "--title", "X",
+        "--body-file", "/nonexistent/path/body.md",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "q"}]),
+        "--json",
+    ])
+    # click.Path(exists=True) 会拒绝不存在的路径 (exit 2, usage 错)
+    assert res.exit_code != 0
+
+
+def test_concepts_update_body_file(vault: Path, external: Path):
+    """concepts update 也支持 --body-file."""
+    from corpus.storage import init_db, read_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    # 先写一个
+    _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "u", "--title", "U",
+        "--body", "initial body",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "q"}]),
+        "--json",
+    ])
+    # 通过 --body-file 替换
+    body_path = vault / "new_body.md"
+    body_path.write_text(
+        "updated body with [[lscpu]] wikilink and shell chars: $1 && | &",
+        encoding="utf-8",
+    )
+    res = _runner().invoke(cli, [
+        "concepts", "update", str(vault), "u",
+        "--body-file", str(body_path),
+        "--json",
+    ])
+    assert res.exit_code == 0, res.output
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "u")
+    assert info["body"].startswith("updated body with")
+    assert "lscpu" in info["links"]

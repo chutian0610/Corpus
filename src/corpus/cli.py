@@ -705,11 +705,14 @@ def concepts() -> None:
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.option("--slug", required=True, help="filesystem-safe slug")
 @click.option("--title", required=True)
-@click.option("--body", required=True, help="wiki body (markdown)")
+@click.option("--body", default=None, help="wiki body markdown 字符串 (与 --body-file 互斥)")
+@click.option("--body-file", "body_file",
+              type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+              default=None,
+              help="从文件读 body (省 LLM shell 转义; 与 --body 互斥)")
 @click.option("--extractions", "extractions_json", required=True,
               help='JSON array: [{"source_id":"abc","quote_span":"..."}, ...]')
 @click.option("--prompt-version", default=None)
-@click.option("--links", "links", default="", help="逗号分隔的 wikilink slug 列表")
 @click.option("--status", default="draft",
               help="concept 生命周期 (draft / evergreen / stale)")
 @click.option("--aliases", default="",
@@ -718,15 +721,27 @@ def concepts() -> None:
               help="逗号分隔的 tags (概念分类, 例 'concept,database')")
 @click.option("--json", "as_json", is_flag=True)
 def concepts_write(
-    vault_path: Path, slug: str, title: str, body: str,
+    vault_path: Path, slug: str, title: str, body: str | None, body_file: Path | None,
     extractions_json: str, prompt_version: str | None,
-    links: str, status: str, aliases: str, tags: str,
+    status: str, aliases: str, tags: str,
     as_json: bool,
 ) -> None:
     """写一篇 wiki concept。slug 已存在 → ConflictError。
 
+    --body / --body-file 二选一: 前者 inline 字符串, 后者从文件读 (省 shell 转义).
     必须传 --extractions：每个 source 一段 quote_span 原文证据。
     """
+    # --body / --body-file 互斥
+    if body is not None and body_file is not None:
+        _err("--body 和 --body-file 互斥, 不能同时传")
+    if body is None and body_file is None:
+        _err("必须传 --body 或 --body-file 之一")
+    if body_file is not None:
+        body = body_file.read_text(encoding="utf-8")
+        # 上限 1 MiB; concept body 是 wiki prose, 远超此即 prompt 异常
+        if len(body.encode("utf-8")) > 1024 * 1024:
+            _err(f"--body-file 过大 (>1 MiB): {body_file}")
+
     paths = _resolve_db(vault_path)
     try:
         extractions_data = json.loads(extractions_json)
@@ -785,7 +800,11 @@ def concepts_write(
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.argument("slug")
 @click.option("--title", default=None, help="新标题 (省略则不改)")
-@click.option("--body", default=None, help="新正文 (省略则不改)")
+@click.option("--body", default=None, help="新正文 markdown 字符串 (与 --body-file 互斥)")
+@click.option("--body-file", "body_file",
+              type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+              default=None,
+              help="从文件读 body (省 LLM shell 转义; 与 --body 互斥)")
 @click.option("--status", default=None, help="新 status (省略则不改)")
 @click.option("--add-extractions", "add_extractions_json", default=None,
               help='JSON array: [{"source_id":"...","quote_span":"..."}, ...] (增量加 extractions, 必填 quote_span)')
@@ -797,11 +816,19 @@ def concepts_write(
 @click.option("--json", "as_json", is_flag=True)
 def concepts_update(
     vault_path: Path, slug: str,
-    title: str | None, body: str | None, status: str | None,
+    title: str | None, body: str | None, body_file: Path | None,
+    status: str | None,
     add_extractions_json: str | None,
     prompt_version: str | None, expected_version: int | None,
     as_json: bool,
 ) -> None:
+    # --body / --body-file 互斥
+    if body is not None and body_file is not None:
+        _err("--body 和 --body-file 互斥, 不能同时传")
+    if body_file is not None:
+        body = body_file.read_text(encoding="utf-8")
+        if len(body.encode("utf-8")) > 1024 * 1024:
+            _err(f"--body-file 过大 (>1 MiB): {body_file}")
     """增量更新 concept: 改 title/body, 加 extractions, 加 wikilinks.
 
     仅做增量 (与 write_concept 不同, 没有"全量覆盖 extractions"接口).
