@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 
 import pytest
+import sqlite3
 from click.testing import CliRunner
 
 from corpus.cli import cli
@@ -829,3 +830,154 @@ def test_concepts_update_body_file(vault: Path, external: Path):
     info = read_concept(vault / ".wiki-meta" / "corpus.db", "u")
     assert info["body"].startswith("updated body with")
     assert "lscpu" in info["links"]
+
+
+# ---------- --extractions-file: 从文件读 JSON array ----------
+def test_concepts_write_extractions_file_basic(vault: Path, external: Path):
+    """--extractions-file 从文件读 JSON array, 含 shell-special chars 也能 round-trip."""
+    from corpus.storage import init_db, read_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "x.md").write_text("x content", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    # 写 JSON array 到 temp 文件 (含特殊字符: 双引号 / 反斜杠 / unicode)
+    extractions_path = vault / "extr.json"
+    extractions_data = [
+        {"source_id": sid, "quote_span": 'quote with "double" + \\backslash + 中文'},
+        {"source_id": sid, "quote_span": "another line"},
+    ]
+    extractions_path.write_text(
+        json.dumps(extractions_data, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "ef", "--title", "EF",
+        "--body", "body see [[lscpu]]",
+        "--extractions-file", str(extractions_path),
+        "--json",
+    ])
+    assert res.exit_code == 0, res.output
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "ef")
+    # 两个 extractions 都进 DB
+    with sqlite3.connect(str(vault / ".wiki-meta" / "corpus.db")) as c:
+        c.row_factory = sqlite3.Row
+        ext_n = c.execute(
+            "SELECT COUNT(*) AS n FROM extractions WHERE concept_slug='ef'"
+        ).fetchone()["n"]
+    assert ext_n == 2, f"expected 2 extractions, got {ext_n}"
+    # 引号 / 反斜杠 / unicode 都保留
+    qs_conn = sqlite3.connect(str(vault / ".wiki-meta" / "corpus.db"))
+    qs_conn.row_factory = sqlite3.Row
+    qs_rows = [
+        r["quote_span"]
+        for r in qs_conn.execute(
+            "SELECT quote_span FROM extractions WHERE concept_slug='ef' ORDER BY extraction_id"
+        ).fetchall()
+    ]
+    assert any('"double"' in q and "\\backslash" in q and "中文" in q for q in qs_rows), qs_rows
+
+
+def test_concepts_write_extractions_and_extractions_file_mutex(vault: Path, external: Path):
+    """--extractions 与 --extractions-file 不能同时传."""
+    from corpus.storage import init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    extr_path = vault / "extr.json"
+    extr_path.write_text(json.dumps([{"source_id": sid, "quote_span": "q"}]), encoding="utf-8")
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "x", "--title", "X",
+        "--body", "body",
+        "--extractions", json.dumps([{"source_id": sid, "quote_span": "q"}]),
+        "--extractions-file", str(extr_path),
+        "--json",
+    ])
+    assert res.exit_code == 1
+    assert "互斥" in (res.stderr or "")
+
+
+def test_concepts_write_neither_extractions_nor_file(vault: Path, external: Path):
+    """--extractions / --extractions-file 必须传一个."""
+    from corpus.storage import init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "x", "--title", "X",
+        "--body", "body",
+        "--json",
+    ])
+    assert res.exit_code == 1
+    assert "extractions" in (res.stderr or "").lower()
+
+
+def test_concepts_write_extractions_file_invalid_json(vault: Path, external: Path):
+    """--extractions-file 里的 JSON 不是合法 → exit 1."""
+    from corpus.storage import init_db
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "x.md").write_text("x", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "x.md"), "--json"])
+    sid = json.loads(res.output)["source_id"]
+
+    extr_path = vault / "extr.json"
+    extr_path.write_text("not valid json {{{", encoding="utf-8")
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "x", "--title", "X",
+        "--body", "body",
+        "--extractions-file", str(extr_path),
+        "--json",
+    ])
+    assert res.exit_code == 1
+    assert "JSON" in (res.stderr or "") or "json" in (res.stderr or "")
+
+
+def test_concepts_update_add_extractions_file(vault: Path, external: Path):
+    """concepts update --add-extractions-file 也走文件读."""
+    from corpus.storage import init_db, read_concept
+    init_db(vault / ".wiki-meta" / "corpus.db")
+    (external / "a.md").write_text("alpha", encoding="utf-8")
+    (external / "b.md").write_text("beta", encoding="utf-8")
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "a.md"), "--json"])
+    sid_a = json.loads(res.output)["source_id"]
+    res = _runner().invoke(cli, ["sources", "ingest", str(vault), str(external / "b.md"), "--json"])
+    sid_b = json.loads(res.output)["source_id"]
+
+    # 初始 concept (用 sid_a)
+    res = _runner().invoke(cli, [
+        "concepts", "write", str(vault),
+        "--slug", "u", "--title", "U", "--body", "initial",
+        "--extractions", json.dumps([{"source_id": sid_a, "quote_span": "alpha"}]),
+        "--json",
+    ])
+    assert res.exit_code == 0, res.output
+
+    # 加 sid_b: JSON 文件读入
+    add_path = vault / "add.json"
+    add_path.write_text(
+        json.dumps([{"source_id": sid_b, "quote_span": "beta with 'quotes' & symbols"}]),
+        encoding="utf-8",
+    )
+    res = _runner().invoke(cli, [
+        "concepts", "update", str(vault), "u",
+        "--add-extractions-file", str(add_path),
+        "--json",
+    ])
+    assert res.exit_code == 0, res.output
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "u")
+    assert sid_a in info["source_ids"] and sid_b in info["source_ids"]
+    # 多了 1 条 extraction
+    with sqlite3.connect(str(vault / ".wiki-meta" / "corpus.db")) as c:
+        ext_n = c.execute(
+            "SELECT COUNT(*) AS n FROM extractions WHERE concept_slug='u'"
+        ).fetchone()[0]
+    assert ext_n == 2, f"expected 2 extractions, got {ext_n}"

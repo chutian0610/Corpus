@@ -36,10 +36,21 @@ corpus sources ingest <vault> <file>
 corpus sources batch <vault> <dir> --glob "*.md"
 
 # 写 / 查 concept（agent 自己用 LLM 生成 body + **必传 quote_span**）
-corpus concepts write <vault> --slug X --title Y --body Z     --extractions '[{"source_id":"SID","quote_span":"原文片段..."}]'     --prompt-version extract-v1     --links ...
+corpus concepts write <vault> --slug X --title Y \
+    --body "..." --extractions '[{"source_id":"SID","quote_span":"原文片段..."}]' \
+    --prompt-version extract-v1
 corpus concepts show <vault> <slug>
 corpus concepts search <vault> <query>
 corpus concepts evidence <vault> <slug>  # 查抽取证据
+
+# LLM 抽 concept 时推荐走 **临时文件**, 避免在 shell 里转义多行 markdown / JSON:
+corpus concepts write <vault> --slug X --title Y \
+    --body-file .tmp/concept-X.md \
+    --extractions-file .tmp/concept-X-extr.json \
+    --prompt-version extract-v1
+# --body / --body-file 互斥; --extractions / --extractions-file 互斥
+# (concepts update 同理: --body-file / --add-extractions-file)
+# 文件上限 1 MiB; 文件路径不存在 → click.Path 自动 exit 2
 
 # 维护 vault
 corpus sources delete <vault> <sid>     # 默认 dry-run，看 orphan 影响

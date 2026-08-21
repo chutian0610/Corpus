@@ -130,6 +130,47 @@ LLM 返回结构:
 }
 ```
 
+## Step 2.5 — 写 concept 时推荐走临时文件 (LLM shell 转义坑)
+
+LLM 抽概念时, body 多含多行 markdown + shell-special chars(`$1`, `&`, `|`, `;`, 反引号,
+单/双引号), extractions 是 inline JSON 又长又容易把 `'` 嵌错嵌套. 走 inline CLI 参数会
+陷入 zsh / bash 引号地狱, 失败模式多:
+
+```bash
+# 反例: body 内有反引号 / $VAR, 在 --body '...' 里要复杂转义
+corpus concepts write <vault> \
+    --slug mvcc --title "MVCC" \
+    --body '`xmin` 标识可见性; `$$` 在 bash 里是 PID (小心); \
+            `${HOME}` 在单引号里不展开; \
+            `&&` 在 markdown 里没事但 bash 会逻辑短路' \
+    --extractions '[{"source_id":"abc","quote_span":"..."}]' \
+# ↑ 引号一错 zsh 直接 `parse error near '&&'`, 写了一长串调试转义性价比极低
+```
+
+**推荐**: LLM 先用 `Write` 工具把 body 写到 `.tmp/<slug>.md` / `.tmp/<slug>-extr.json`,
+然后 CLI 走 `--body-file` / `--extractions-file`:
+
+```bash
+corpus concepts write <vault> \
+    --slug mvcc --title "PostgreSQL MVCC" \
+    --body-file .tmp/mvcc.md \                       # 多行 markdown 原样写
+    --extractions-file .tmp/mvcc-extr.json \         # JSON 文件原样读
+    --prompt-version extract-v1 \
+    --status draft
+# 上限 1 MiB / file. 不存在 → click.Path exit 2. 与 inline 互斥 (不能同时传两个).
+```
+
+| 标志 | 互斥 | 适用 |
+|---|---|---|
+| `--body` / `--body-file` | yes | update 也支持 `--body-file` |
+| `--extractions` / `--extractions-file` | yes | write required |
+| `--add-extractions` / `--add-extractions-file` (update) | yes | update required-none |
+
+**为什么 CLI 不吞 stdin**: corpus 走 click (不是 stdin-JSON 设计), 走文件是最干净的.
+Temp 路径 `.tmp/` 在 vault `.gitignore` 顶层 (.agents/skills/corpus-init/SKILL.md 有),
+不会提交到 vault git.
+
+
 ## Step 3 — Dedup 检查 (find-by-link / dedup-candidates)
 
 **find-by-link** (单 slug 查询):
