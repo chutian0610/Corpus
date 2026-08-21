@@ -135,7 +135,14 @@ uv tool install -e .   # editable, 改了 src/ 立即生效
   - 历史 bug 残留: 之前版本 `update_source_page_concepts` 可能把原文写进 wiki/source, 现在每次 sync 都按 single-source-of-truth 回归——自动清掉多余 body, frontmatter 保留.
 - **`export_index` 导出列** (wiki/index/concepts.json): slug / concept_id / title / source_ids / links / is_orphan / version / **status / aliases / tags** / certified_score / certified_at / certified_issues / certified_suggestions / certified_by / created_at / updated_at. body 故意不导出 (体积大, 看概念细节读 wiki/concept/<slug>.md)
 
-**Schema 版本**：当前 `SCHEMA_VERSION=2`。`init_db()` 检测 `schema_meta` 表：
+**Schema 版本**：不要 hardcode 数字(version 变化时文档失修). 运行时查法:
+
+```bash
+python3 -c "from corpus.storage import SCHEMA_VERSION; print(SCHEMA_VERSION)"        # 代码侧
+sqlite3 <vault>/.wiki-meta/corpus.db 'SELECT value FROM schema_meta WHERE key="schema_version"'   # 落库后
+```
+
+`init_db()` 检测 `schema_meta` 表:
 - 无记录 → 视为 v1（旧 DDL 含 `UNIQUE(content_hash)`），跑 v1→v2 migration
 - 有记录且 < 当前 → 按 `_MIGRATIONS` dict 顺序跑每一步
 - 新版 DDL 不再有 `UNIQUE(content_hash)`，因为软删后同 hash 复活需要 UNIQUE 不存在；改由 `stage_source()` 在 storage 层查重 + 按 status 决定 raise / revive

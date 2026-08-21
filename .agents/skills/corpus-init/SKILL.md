@@ -85,7 +85,7 @@ Returns JSON:
   "wiki_index": "<path>/wiki/index",
   "meta": "<path>/.wiki-meta",
   "corpus_db": "<path>/.wiki-meta/corpus.db",
-  "schema_version": 2,
+  "schema_version": <int>,                  // 当前 storage.SCHEMA_VERSION — 不要 hardcode 数字
   "git": {"git_initialized": true, "git_path": "<path>/.git",
            "commit": {"committed": true, "commit_sha": "abc...", "commit_message": "chore: init corpus vault"}}
 }
@@ -99,9 +99,21 @@ corpus vault info <vault_path> --json
 
 Expect:
 - `db_initialized: true`
-- `schema_version: 4`
 - `has_sources: false` (initially)
 - `has_concepts: false` (initially)
+
+> **不要 hardcode schema_version**。vault_info JSON 里**根本没有** `schema_version` 字段
+> (`db_initialized / has_sources / has_concepts` 才存在). 真要查 schema 版本:
+>
+> ```bash
+> # CLI 侧 (init 返回的 schema_version)
+> corpus vault init <vault> --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["schema_version"])'
+>
+> # 落库侧 (schema_meta 表)
+> sqlite3 <vault>/.wiki-meta/corpus.db 'SELECT value FROM schema_meta WHERE key="schema_version"'
+> ```
+>
+> 两个输出一致说明 init 完整跑完; 不一致说明 migration 中途, 看 `corpus --version` 对齐后再排查.
 
 ## Vault layout
 
