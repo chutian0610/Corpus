@@ -2,7 +2,9 @@
 name: corpus-ingest
 description: >
   完整 ingest 工作流: source markdown → vault ingest → LLM 抽 concept → 
-  dedup (find-by-link match_score) → concepts write/update (with CAS) → index sync.
+  dedup (find-by-link match_score) → concepts write/update (with CAS).
+  index sync 不再自动触发 (opt-in), 想给外部 web UI / dashboard 喂 snapshot
+  用 `corpus index sync <vault>` 手动跑.
   Use this skill when the user has source content (markdown files, articles, notes, 
   design docs) to ingest into a corpus vault. 触发词: "入库 X", "抽 concept", 
   "build knowledge base", "把 N 个 markdown 入库", "process sources", 
@@ -17,7 +19,7 @@ description: >
     5b. corpus concepts update (已有, --expected-version CAS 防 race) — 含 body / source_ids / status 合并
     5c. corpus concepts add-source (只加新 source 到已有 concept, 不动 body)
     5d. corpus concepts remove-source / remove-extraction (从已有 concept 删 source 或撤抽取)
-    6. corpus index sync (写/update/add-source 时已自动 export_index, 兜底手动跑)
+    6. (opt-in) corpus index sync (默认 vault.git 看不到这两个 JSON; 想要 snapshot 手动跑)
   
   Not for: vault setup (→ corpus-init), config (→ corpus-config), audit log (→ corpus skill), 
   maintenance (→ corpus-maintain, 未来). Multi-agent 并发: write_concept 严格 INSERT (slug 撞抛 ConflictError), 
@@ -275,7 +277,8 @@ corpus concepts add-source <vault> postgresql-mvcc \
 
 ## Step 5 — Index sync (自动)
 
-`concepts write` / `update` / `delete` 内部已经调 `export_index`, 自动写 `wiki/index/concepts.json` + `sources.json`. 手动兜底:
+**没有自动 index sync 了.** `concepts write` / `update` / `delete` 不再自动写 `wiki/index/{concepts,sources}.json` (没人读, opt-in).
+default `.gitignore` 含 `wiki/index/*.json`. 想要 snapshot (e.g. 给 web UI 喂数据) 手动跑:
 
 ```bash
 corpus index sync <vault> --json

@@ -123,7 +123,7 @@ Expect:
 ├── raw/                   # ingest 产物
 ├── wiki/
 │   ├── concept/           # corpus concepts write 生成的 wiki 页 (<slug>.md)
-│   └── index/             # 自动 export_index: concepts.json + sources.json
+│   └── index/             # opt-in: `corpus index sync <vault>` 手动生成 snapshot (默认不入 git)
 └── .wiki-meta/
     └── corpus.db          # SQLite
 ```

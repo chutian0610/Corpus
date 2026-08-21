@@ -168,10 +168,11 @@ def test_vault_init_initial_commit(vault: Path):
     assert commit["commit_sha"]  # 应该是 40-char hex
     assert commit["commit_message"] == "chore: init corpus vault"
 
-    # .gitignore 存在且排除 *.db
+    # .gitignore 存在且排除 *.db / .wiki-meta/ / wiki/index/*.json
     gi = (new_vault / ".gitignore").read_text()
     assert "*.db" in gi
     assert ".wiki-meta/" in gi  # 整个 .wiki-meta/ 排除
+    assert "wiki/index/*.json" in gi  # opt-in snapshot 默认不入 git
 
     # raw/ / wiki/concept/ / wiki/index/ 都有 .gitkeep
     for sub in ("raw", "wiki/concept", "wiki/index"):

@@ -136,4 +136,4 @@ for it in items:
 | `concepts evidence <vault> <slug> [--source-id SID]` | 查抽取证据 (quote_span + agent + prompt + time) |
 | `concepts add-source <vault> <slug> --source-id SID --quote-span "..."` | 给 concept 加一个 source (自动写 extractions + 清 is_orphan) |
 | `concepts remove-source <vault> <slug> --source-id SID` | 从 concept 移除一个 source (自动 is_orphan 同步) |
-| `index sync <vault>` | 导出 wiki/index/concepts.json + sources.json (write/update/delete/remove-extraction 时已自动调, 这是兜底) |
+| `index sync <vault>` | opt-in 导出 wiki/index/concepts.json + sources.json (想要 snapshot 手动跑; 已不再被 write/update/delete 自动触发) |

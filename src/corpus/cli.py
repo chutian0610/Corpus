@@ -676,15 +676,16 @@ def sources_delete(vault_path: Path, source_id: str, yes: bool, dry_run: bool, r
 # 顶层 stats alias（agent 常用）
 cli.add_command(vault_stats, name="stats")
 
-# 顶层 index sync（导出 wiki/index/*.json）
+# 顶层 index sync（opt-in — 不再被 concept write / update / delete 自动触发, 想要 snapshot 手动跑）
 @cli.command(name="index")
 @click.argument("subcmd", type=click.Choice(["sync"]))
 @click.argument("vault_path", type=click.Path(path_type=Path))
 @click.option("--json", "as_json", is_flag=True)
 def cli_index(subcmd: str, vault_path: Path, as_json: bool) -> None:
-    """维护 wiki/index/ 全局索引。
+    """维护 wiki/index/ 全局索引 (opt-in).
 
     corpus index sync <vault> → 重建 wiki/index/concepts.json + sources.json
+    无 caller 自动触发; 想给外部 web UI / dashboard 喂 snapshot 手动跑.
     """
     if subcmd != "sync":
         _err(f"unknown subcmd: {subcmd}")
@@ -805,8 +806,6 @@ def concepts_write(
         # 双向同步: 更新每个 source page 的 '## Concepts extracted' 段 (反查 extractions)
         for sid in result["source_ids"]:
             update_source_page_concepts(paths["root"], sid)
-        # 自动 export index
-        export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
@@ -900,7 +899,6 @@ def concepts_update(
             _sync_concept_file(paths, slug)
             info = read_concept(paths["corpus_db"], slug) or {}
             result["wiki_path"] = str(paths["wiki_concept"] / f"{slug}.md")
-        export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
@@ -944,7 +942,6 @@ def concepts_delete(vault_path: Path, slug: str, dry_run: bool, as_json: bool) -
                 result["wiki_file_removed"] = True
             except OSError:
                 result["wiki_file_removed"] = False
-        export_index(paths["corpus_db"], paths["wiki_index"])
     except Exception as e:
         _err(str(e), hint=getattr(e, "hint", None))
     _emit(result, as_json=as_json)
@@ -1110,7 +1107,6 @@ def concepts_certify(
         _err(str(e), hint=getattr(e, "hint", None))
     # 同步 frontmatter (certified_at / score / issues / suggestions 写进 markdown)
     _sync_concept_file(paths, slug)
-    export_index(paths["corpus_db"], paths["wiki_index"])
     _emit(result, as_json=as_json)
 
 
@@ -1161,7 +1157,6 @@ def concepts_add_source(vault_path: Path, slug: str, source_id: str, quote_span:
             paths["corpus_db"], slug, source_id,
             quote_span=quote_span, prompt_version=prompt_version,
         )
-        export_index(paths["corpus_db"], paths["wiki_index"])
         _sync_concept_file(paths, slug)
         # 双向同步: 更新 source wiki page 的 '## Concepts extracted' 段
         update_source_page_concepts(paths["root"], source_id)
@@ -1186,7 +1181,6 @@ def concepts_remove_extraction(vault_path: Path, extraction_id: str, as_json: bo
     paths = _resolve_db(vault_path)
     try:
         result = remove_extraction(paths["corpus_db"], extraction_id)
-        export_index(paths["corpus_db"], paths["wiki_index"])
         _sync_concept_file(paths, result["concept_slug"])
         # result 含 source_id (remove_extraction return)
         if result.get("source_id"):
@@ -1206,7 +1200,6 @@ def concepts_remove_source(vault_path: Path, slug: str, source_id: str, as_json:
     paths = _resolve_db(vault_path)
     try:
         result = remove_source_from_concept(paths["corpus_db"], slug, source_id)
-        export_index(paths["corpus_db"], paths["wiki_index"])
         _sync_concept_file(paths, slug)
         update_source_page_concepts(paths["root"], source_id)
     except Exception as e:
