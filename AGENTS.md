@@ -126,6 +126,13 @@ uv tool install -e .   # editable, 改了 src/ 立即生效
 - `find_concept_by_link` 加 `match_score` (1.0 exact / 0.9 startswith / 0.5 contains / 0.4 title), 完全不相关过滤掉, 按 score DESC + slug 长度 ASC 排序
 - `mark_certified` 用 microsecond 精度时间戳 (`_utc_now_iso()` 是 seconds 精度, 同秒两次认证会撞 `certification_log` 的 (concept_id, certified_at) PK)
 - 同一 (source, concept) 可多次抽取，每次都记 extractions 一行（audit history）
+- **concept 生命周期 (schema v5)**: `status` 列 = `draft` (默认，LLM 新写未审查) / `evergreen` (人工或 QA 标记为长期有效知识) / `stale` (源改了/过期待重新抽取). CLI: `corpus concepts update <vault> <slug> --status evergreen`. 过滤: `corpus concepts list --status evergreen`.
+- **DB ↔ markdown 一致性** (任何 DB 写入都要同步):
+  - `concepts write` 把 status/aliases/tags 直接透传给 `write_concept_file` 写进 frontmatter
+  - `concepts update` 触发 markdown 重写的条件 = body/title/status/extractions/links 任一非 None (任意一项改了都重 sync, 防 drift)
+  - `certify` / `unmark` 无条件 sync (score / issues / suggestions 必更新)
+  - `wiki/source/<slug>.md` 更新时保留 article 原文, 仅替换 `## Concepts extracted from this source` 段 (`update_source_page_concepts`)
+- **`export_index` 导出列** (wiki/index/concepts.json): slug / concept_id / title / source_ids / links / is_orphan / version / **status / aliases / tags** / certified_score / certified_at / certified_issues / certified_suggestions / certified_by / created_at / updated_at. body 故意不导出 (体积大, 看概念细节读 wiki/concept/<slug>.md)
 
 **Schema 版本**：当前 `SCHEMA_VERSION=2`。`init_db()` 检测 `schema_meta` 表：
 - 无记录 → 视为 v1（旧 DDL 含 `UNIQUE(content_hash)`），跑 v1→v2 migration

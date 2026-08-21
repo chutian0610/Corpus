@@ -1596,3 +1596,174 @@ def test_write_source_wiki_page_slug_collision(tmp_path: Path):
     # 两个内容都保留
     assert "v1" in p1.read_text()
     assert "v2" in p2.read_text()
+
+
+# ---------- Bug D: source page body 不丢 ----------
+def test_update_source_page_concepts_preserves_body(tmp_path: Path):
+    """update_source_page_concepts 重写 '## Concepts extracted' 段不丢 article body."""
+    from corpus.storage import (
+        init_db, stage_source, write_source_wiki_page,
+        update_source_page_concepts, write_concept,
+    )
+
+    vault = tmp_path
+    db_path = vault / ".wiki-meta" / "corpus.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    src = stage_source(
+        db_path,
+        raw_path=tmp_path / "raw" / "article.md",
+        content="# Article\n\nbody content here\n",
+        original_filename="article.md",
+    )
+    sid = src["source_id"]
+
+    # 写 wiki/source/<slug>.md, 含 article body
+    article_body = (
+        "# Article\n\nbody content here\n\n"
+        "## Concepts extracted from this source\n\n"
+        "_(none yet)_\n"
+    )
+    src_path = write_source_wiki_page(
+        tmp_path, sid, slug="article-test",
+        content_hash=src["content_hash"],
+        original_filename="article.md", size_bytes=src["size_bytes"],
+        status="staged", body=article_body,
+    )
+
+    # 加 extraction
+    write_concept(
+        db_path,
+        slug="my-concept", title="My Concept", body="c",
+        extractions_data=[{
+            "source_id": sid,
+            "quote_span": "body content here",
+        }],
+        links=[],
+    )
+
+    # 调 update_source_page_concepts —— 模拟 concepts write 后的同步
+    update_source_page_concepts(tmp_path, sid)
+
+    final = src_path.read_text()
+    # article body 必须在
+    assert "# Article" in final, "article heading was lost"
+    assert "body content here" in final, "article body was lost"
+    # extraction 也必须在
+    assert "my-concept" in final
+    assert "body content here" in final  # quote_span 显示
+    # 段标题必须在
+    assert "## Concepts extracted from this source" in final
+    # 旧占位符 _(none yet)_ 已被替换 (不能 出现两次)
+    assert final.count("_(none yet)_") == 0
+
+
+def test_update_source_page_concepts_no_body_works(tmp_path: Path):
+    """初次 (没 article body) 也得能写 section."""
+    from corpus.storage import (
+        init_db, stage_source, write_source_wiki_page,
+        update_source_page_concepts,
+    )
+
+    vault = tmp_path
+    db_path = vault / ".wiki-meta" / "corpus.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    src = stage_source(
+        db_path,
+        raw_path=tmp_path / "raw" / "x.md",
+        content="x", original_filename="x.md",
+    )
+    sid = src["source_id"]
+
+    src_path = write_source_wiki_page(
+        tmp_path, sid, slug="x",
+        content_hash=src["content_hash"], original_filename="x.md",
+        size_bytes=src["size_bytes"], status="staged",
+        body="## Concepts extracted from this source\n\n_(none yet)_\n",
+    )
+
+    update_source_page_concepts(tmp_path, sid)
+    final = src_path.read_text()
+    # 没 article body 时只写 section, 不能崩
+    assert "## Concepts extracted from this source" in final
+    assert "_(none yet)_" in final
+
+
+# ---------- Bug A: write_concept_file 接 status/aliases/tags ----------
+def test_write_concept_file_passes_status_aliases_tags(tmp_path: Path):
+    """write_concept_file 接受 status/aliases/tags 参数, 写进 frontmatter."""
+    from corpus.storage import write_concept_file
+    from corpus.frontmatter import read_md_with_frontmatter
+    p = write_concept_file(
+        tmp_path, slug="x", title="X", body="b",
+        source_ids=["sid1"], links=[], version=0,
+        status="evergreen", aliases=["X alias", "X2"], tags=["linux", "cpu"],
+    )
+    meta, body = read_md_with_frontmatter(p)
+    assert meta["status"] == "evergreen"
+    assert meta["aliases"] == ["X alias", "X2"]
+    assert meta["tags"] == ["linux", "cpu"]
+
+
+# ---------- Bug C: export_index 含 status/aliases/tags ----------
+def test_export_index_includes_status_aliases_tags(
+    db: Path, staged_source: str, tmp_path: Path,
+):
+    """export_index 导出的 concepts.json 含 status / aliases / tags."""
+    write_concept(
+        db, slug="x", title="X", body="b",
+        extractions_data=[_make_extraction(staged_source)],
+        links=[], status="evergreen",
+        aliases=["x-alias", "X 别名"],
+        tags=["linux", "cpu"],
+    )
+    index_dir = tmp_path / "wiki_index"
+    export_index(db, index_dir)
+    data = json.loads((index_dir / "concepts.json").read_text())
+    assert data["total"] == 1
+    c = data["concepts"][0]
+    assert c["status"] == "evergreen"
+    assert c["aliases"] == ["x-alias", "X 别名"]
+    assert c["tags"] == ["linux", "cpu"]
+
+
+# ---------- Bug B: update_concept status changes sync markdown ----------
+def test_update_concept_status_syncs_to_markdown(
+    db: Path, staged_source: str, tmp_path: Path,
+):
+    """update_concept 改 status 后, markdown frontmatter 也必须反映."""
+    # write_concept 自身已经是 fix 后的 (Bug A), 显式 draft
+    write_concept(
+        db, slug="x", title="X", body="b",
+        extractions_data=[_make_extraction(staged_source)],
+        links=[], status="draft",
+    )
+    vault = tmp_path
+    # 模拟 CLI 路径: write_concept_file 后, markdown 是 draft
+    from corpus.storage import write_concept_file, read_concept_file
+    write_concept_file(
+        vault, slug="x", title="X", body="b",
+        source_ids=[staged_source], links=[],
+        version=0, status="draft",
+    )
+    md_meta = read_concept_file(vault, "x")
+    assert md_meta["status"] == "draft"
+
+    # 模拟 CLI: update_concept 改 status, 然后 _sync_concept_file (cli 内部)
+    update_concept(db, slug="x", status="evergreen", body=None)
+    # 显式调 sync (CLI 中的 _sync_concept_file 行为)
+    from corpus.cli import _sync_concept_file
+    paths = {
+        "corpus_db": db,
+        "root": vault,
+        "wiki_concept": vault / "wiki" / "concept",
+    }
+    _sync_concept_file(paths, "x")
+
+    md_meta = read_concept_file(vault, "x")
+    assert md_meta["status"] == "evergreen", (
+        "markdown status 没更新 — Bug B 仍存在"
+    )

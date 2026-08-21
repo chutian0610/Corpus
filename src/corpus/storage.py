@@ -1300,7 +1300,13 @@ def update_source_page_concepts(vault_root: Path, source_id: str) -> None:
     new_concepts_section = _build_concepts_extracted_section(
         vault_root, source_id, original_body,
     )
-    _write_md(target, meta=meta, body=new_concepts_section)
+    # 保留原 article body,仅替换 '## Concepts extracted' 段.
+    # 之前版本只写 new_concepts_section,会把 article 原文吃掉.
+    full_body = (
+        original_body + "\n\n" + new_concepts_section
+        if original_body else new_concepts_section
+    )
+    _write_md(target, meta=meta, body=full_body)
 
 
 def read_source_file(path: Path) -> dict[str, Any] | None:
@@ -2318,7 +2324,9 @@ def export_index(db_path: Path, wiki_index_dir: Path) -> dict[str, Any]:
     with connect(db_path) as conn:
         concepts_rows = conn.execute(
             """SELECT slug, concept_id, title, source_ids, links,
-                      is_orphan, version, certified_score, certified_at,
+                      is_orphan, version, status, aliases, tags,
+                      certified_score, certified_at, certified_issues,
+                      certified_suggestions, certified_by,
                       created_at, updated_at
             FROM concepts ORDER BY slug"""
         ).fetchall()
@@ -2333,6 +2341,10 @@ def export_index(db_path: Path, wiki_index_dir: Path) -> dict[str, Any]:
         d = dict(r)
         d["source_ids"] = _parse_json_list(d["source_ids"])
         d["links"] = _parse_json_list(d["links"])
+        d["aliases"] = _parse_json_list(d["aliases"])
+        d["tags"] = _parse_json_list(d["tags"])
+        d["certified_issues"] = _parse_json_list(d["certified_issues"])
+        d["certified_suggestions"] = _parse_json_list(d["certified_suggestions"])
         d["is_orphan"] = bool(d["is_orphan"])
         concepts_data.append(d)
 

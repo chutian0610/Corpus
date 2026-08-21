@@ -252,7 +252,7 @@ def _ingest_one_source(
         except Exception:
             pass
         raise StorageError(
-            f"failed to write source page for source_id={result["source_id"]}: {e}",
+            f'failed to write source page for source_id={result["source_id"]}: {e}',
             hint="DB rolled back; raw/<file> 保留但未与 DB 关联 (可手动 sources delete 或重新 ingest)",
         ) from e
 
@@ -762,6 +762,9 @@ def concepts_write(
                 links=link_list,
                 version=result["version"],
                 created_at=result["created_at"],
+                status=status,
+                aliases=alias_list,
+                tags=tag_list,
             )
         except OSError as e:
             delete_concept(paths["corpus_db"], slug)
@@ -838,7 +841,11 @@ def concepts_update(
             status=status,
         )
         # 物理写文件 (DB 已更新, 同步 frontmatter 反映最新 metadata)
-        if body is not None or title is not None or add_extractions is not None or link_list is not None:
+        # 含 status: 之前版本漏判, 导致仅改 status 时 DB 更新但 markdown 不重写.
+        if (
+            body is not None or title is not None or status is not None
+            or add_extractions is not None or link_list is not None
+        ):
             _sync_concept_file(paths, slug)
             info = read_concept(paths["corpus_db"], slug) or {}
             result["wiki_path"] = str(paths["wiki_concept"] / f"{slug}.md")
