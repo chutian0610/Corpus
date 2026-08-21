@@ -80,13 +80,13 @@ def _sync_concept_file(paths, slug: str) -> None:
     info = read_concept(paths["corpus_db"], slug)
     if info is None:
         return
+    # 注意: 不传 links= 字段. frontmatter 不写 `links:`, body wikilinks 是 sole source of truth.
     write_concept_file(
         paths["root"],
         slug=slug,
         title=info["title"],
         body=info["body"],
         source_ids=info["source_ids"],
-        links=info["links"],
         version=info.get("version", 0),
         created_at=info.get("created_at"),
         updated_at=info.get("updated_at"),
@@ -735,7 +735,7 @@ def concepts_write(
     if not isinstance(extractions_data, list):
         _err("--extractions 必须是 JSON array")
 
-    link_list = [s.strip() for s in links.split(",") if s.strip()]
+    # outgoing links 从 body [[wikilinks]] 自动派生 (storage._extract_wikilinks).
     alias_list = [s.strip() for s in aliases.split(",") if s.strip()] if aliases else None
     tag_list = [s.strip() for s in tags.split(",") if s.strip()] if tags else None
 
@@ -744,7 +744,6 @@ def concepts_write(
             paths["corpus_db"],
             slug=slug, title=title, body=body,
             extractions_data=extractions_data,
-            links=link_list,
             prompt_version=prompt_version,
             status=status,
             aliases=alias_list,
@@ -752,13 +751,13 @@ def concepts_write(
         )
         # 物理写文件 (失败需回滚 DB, 避免概念存在但 wiki 文件缺的不一致)
         # frontmatter 含全部 metadata (slug/title/source_ids/links/version/created_at/updated_at/...)
-        # 让 wiki/concept/<slug>.md 是 source of truth (git 跟踪, 换电脑能 recover)
+        # frontmatter 不写 `links:` 字段 (Obsidian 不显示 frontmatter,
+        # body [[wikilinks]] 才是 sole source of truth for inter-concept links)
         wiki_path = None
         try:
             wiki_path = write_concept_file(
                 paths["root"], slug=slug, title=title, body=body,
                 source_ids=result["source_ids"],
-                links=link_list,
                 version=result["version"],
                 created_at=result["created_at"],
                 status=status,
@@ -790,7 +789,7 @@ def concepts_write(
 @click.option("--status", default=None, help="新 status (省略则不改)")
 @click.option("--add-extractions", "add_extractions_json", default=None,
               help='JSON array: [{"source_id":"...","quote_span":"..."}, ...] (增量加 extractions, 必填 quote_span)')
-@click.option("--add-links", "add_links", default="", help="逗号分隔 wikilink slugs (slug-safe, 拒绝自引用)")
+# outgoing links 通过 body [[wikilinks]] 表达, 不用 --add-links 入参.
 @click.option("--prompt-version", default=None)
 @click.option("--expected-version", type=int, default=None,
               help="CAS: 只在 concept 当前 version 等于此值时 update, 否则 OptimisticLockError. "
@@ -799,7 +798,7 @@ def concepts_write(
 def concepts_update(
     vault_path: Path, slug: str,
     title: str | None, body: str | None, status: str | None,
-    add_extractions_json: str | None, add_links: str,
+    add_extractions_json: str | None,
     prompt_version: str | None, expected_version: int | None,
     as_json: bool,
 ) -> None:
@@ -824,8 +823,6 @@ def concepts_update(
         if not isinstance(add_extractions, list):
             _err("--add-extractions 必须是 JSON array")
 
-    link_list = [s.strip() for s in add_links.split(",") if s.strip()] if add_links else None
-
     paths = _resolve_db(vault_path)
     try:
         result = update_concept(
@@ -834,7 +831,6 @@ def concepts_update(
             title=title,
             body=body,
             add_extractions=add_extractions,
-            add_links=link_list,
             prompt_version=prompt_version,
             expected_version=expected_version,
             status=status,

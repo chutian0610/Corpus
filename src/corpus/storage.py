@@ -450,6 +450,39 @@ def _parse_json_list(s: str | None) -> list[Any]:
     return json.loads(s)
 
 
+
+def _extract_wikilinks(body: str, *, exclude_slug: str | None = None) -> list[str]:
+    """从 markdown body 里抽 Obsidian-style wikilink: [[slug]] 或 [[slug|alias]] 或 [[slug#heading]].
+
+    解析顺序: 先按 `]]` 找右边界, 再砍掉右边的 alias / heading.
+    - slug 经过 slugify() 标准化 (跟 concept slug 一致)
+    - 自引用跳过 (exclude_slug == link_slug)
+    - 不抛错, 纯字符串处理; body 不是 str 时返 []
+    """
+    import re
+    from .ids import slugify
+    if not isinstance(body, str):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in re.finditer(r"\[\[([^\]]+?)\]\]", body):
+        inner = m.group(1).strip()
+        if not inner:
+            continue
+        # 砍 alias / heading: 取第一个 `|` 或 `#` 之前的部分作为 slug
+        for sep in ("|", "#"):
+            if sep in inner:
+                inner = inner.split(sep, 1)[0].strip()
+                break
+        slug = slugify(inner)
+        if not slug or slug == exclude_slug:
+            continue
+        if slug in seen:
+            continue
+        seen.add(slug)
+        out.append(slug)
+    return out
+
 def log_ingest(
     db_path: Path,
     *,
@@ -574,6 +607,9 @@ def stage_source(
                     )
                 # 复活: 保留 source_id 不变 (extractions / concepts 引用稳定),
                 # 清掉 deleted_* 字段, 刷新 raw_path / size / content_hash / created_at.
+                effective_revive_filename = (
+                    original_filename if original_filename else raw_path.name
+                )
                 conn.execute(
                     """UPDATE sources SET
                         status='staged',
@@ -588,7 +624,7 @@ def stage_source(
                     WHERE source_id=?""",
                     (
                         str(raw_path),
-                        original_filename,
+                        effective_revive_filename,
                         len(content_bytes),
                         content_hash,
                         now,
@@ -609,6 +645,11 @@ def stage_source(
                 f"duplicate content already staged as {existing['raw_path']}",
                 hint=f"existing source_id: {existing_id}, status={existing_status}",
             )
+        # original_filename 默认 = raw_path.name (raw/ 下实际文件名).
+        # 旧 caller 可以显式传 None 或某个 cleanup 过 ingest 后缀的名字作为 override.
+        effective_original_filename = (
+            original_filename if original_filename else raw_path.name
+        )
         try:
             conn.execute(
                 """INSERT INTO sources
@@ -617,7 +658,7 @@ def stage_source(
                 (
                     sid,
                     str(raw_path),
-                    original_filename,
+                    effective_original_filename,
                     len(content_bytes),
                     content_hash,
                     now,
@@ -998,9 +1039,18 @@ def restore_from_files(vault_root: Path, *, dry_run: bool = False) -> dict[str, 
 
 
 def _upsert_concept_from_meta(conn, slug: str, meta: dict, body: str) -> None:
-    """从 frontmatter meta 写 concepts 行 (INSERT 或 UPDATE)."""
+    """从 frontmatter meta 写 concepts 行 (INSERT 或 UPDATE).
+
+    `concepts.links` (outgoing wikilinks) **从 body 派生**, 不用 meta.get("links").
+    这与 write_concept / update_concept 保持一致 — frontmatter 不写 links,
+    body 才是 sole source of truth. restore_from_files 读到的旧 frontmatter.links
+    (如果有) 会被忽略, 由 body wikilinks 重建 — 这是 single-source-of-truth 的回归保护.
+    """
     source_ids = list(meta.get("source_ids") or [])
-    links = list(meta.get("links") or [])
+    links = sorted(set(_validate_links(
+        slug,
+        _extract_wikilinks(body, exclude_slug=slug),
+    )))
     aliases = list(meta.get("aliases") or [])
     tags = list(meta.get("tags") or [])
     certified_issues = list(meta.get("certified_issues") or [])
@@ -1105,7 +1155,6 @@ def write_concept_file(
     title: str,
     body: str,
     source_ids: list[str] | None = None,
-    links: list[str] | None = None,
     certified_at: str | None = None,
     certified_score: float | None = None,
     certified_issues: list[str] | None = None,
@@ -1119,13 +1168,18 @@ def write_concept_file(
 ) -> Path:
     """写 wiki/concept/<slug>.md (frontmatter + body), atomic.
 
-    frontmatter 存所有 metadata (slug / title / version / source_ids / links /
-    certified_* / created_at / updated_at / aliases / status / tags).
+    frontmatter 存 metadata (slug / title / version / source_ids / status /
+    certified_* / created_at / updated_at / aliases / tags), **不写 `links:` 字段**.
+
+    outgoing links 的 sole source of truth 是 body 里的 [[wikilinks]] (Obsidian / Foam /
+    Zettelkasten 一致); 前置元数据里的 `links:` 是冗余, 在 Obsidian 中也不可见.
+    详见 storage._extract_wikilinks / corpus-ingest SKILL.
+
     body 是 markdown (LLM 写的 wiki 内容).
 
     返回写入的 path.
     """
-    
+
     now = updated_at or _utc_now_iso()
     if created_at is None:
         created_at = now
@@ -1136,7 +1190,6 @@ def write_concept_file(
         "version": version,
         "status": status,
         "source_ids": list(source_ids or []),
-        "links": list(links or []),
         "aliases": list(aliases or []),
         "tags": list(tags or []),
         "created_at": created_at,
@@ -1350,7 +1403,6 @@ def write_concept(
     title: str,
     body: str,
     extractions_data: list[dict[str, Any]],
-    links: list[str],
     prompt_version: str | None = None,
     extracted_by: str = "agent",
     status: str = "draft",
@@ -1374,8 +1426,12 @@ def write_concept(
     必传 extractions_data: 每个 source_id 对应一段 quote_span 证据.
     - 至少 1 个 extraction
 
+    outgoing links: **从 body 里的 [[wikilinks]] 自动派生**, caller 不再传 links 参数.
+    设计: Obsidian / Andy Matuschak / Zettelkasten 都是 wikilink 写在 body; frontmatter
+    里的 `links:` 字段是冗余. body 是 sole source of truth.
+
     返回: {
-        "concept_id", "slug", "source_ids", "extraction_ids"
+        "concept_id", "slug", "source_ids", "extraction_ids", "links"
     }
     """
     if not extractions_data:
@@ -1398,7 +1454,8 @@ def write_concept(
             )
         source_ids_set.add(sid)
     source_ids = sorted(source_ids_set)
-    links = _validate_links(slug, links)
+    # outgoing links 从 body [[wikilinks]] 派生 (slugify + 自引用 + 去重)
+    links = _validate_links(slug, _extract_wikilinks(body, exclude_slug=slug))
 
     now = _utc_now_iso()
     extraction_ids: list[str] = []
@@ -1520,7 +1577,6 @@ def update_concept(
     title: str | None = None,
     body: str | None = None,
     add_extractions: list[dict[str, Any]] | None = None,
-    add_links: list[str] | None = None,
     prompt_version: str | None = None,
     extracted_by: str = "agent",
     expected_version: int | None = None,
@@ -1536,6 +1592,9 @@ def update_concept(
 
     add_extractions: 格式同 write_concept 的 extractions_data.
     自动去重 source_ids + 更新 extractions 表 + 自动清 is_orphan=0.
+
+    body 改动: outgoing links 从新 body 的 [[wikilinks]] 自动派生, 替换原 outgoing
+    (不再接受 add_links 入参 — caller 通过 body wikilink 表达关系).
 
     expected_version (optional): CAS 标记. None=last-write-wins (快但可能丢数据),
       int=strict CAS (不匹配抛 OptimisticLockError).
@@ -1563,8 +1622,12 @@ def update_concept(
 
             old_source_ids = set(_parse_json_list(row["source_ids"]))
             old_links = set(_parse_json_list(row["links"]))
-            if add_links:
-                add_links = _validate_links(slug, list(add_links))
+            # body 改动时, 重派生 outgoing links (从 [[wikilinks]])
+            new_links: list[str] | None = None
+            if body is not None:
+                new_links = sorted(set(
+                    _validate_links(slug, _extract_wikilinks(body, exclude_slug=slug))
+                ))
 
             # 合并所有 SET (合并到一个 UPDATE 提高效率)
             set_parts: list[str] = []
@@ -1579,7 +1642,7 @@ def update_concept(
                 set_parts.append("status=?")
                 params.append(status)
             # 每次有改动 version+1 (CAS 自增)
-            if set_parts or add_extractions or add_links:
+            if set_parts or add_extractions or (new_links is not None):
                 set_parts.append("version=version+1")
                 set_parts.append("updated_at=?")
                 params.append(now)
@@ -1639,16 +1702,26 @@ def update_concept(
                     (json.dumps(sorted(old_source_ids)), now, slug),
                 )
 
-            if add_links:
-                old_links.update(add_links)
-                conn.execute(
-                    "UPDATE concepts SET links=?, version=version+1, updated_at=? WHERE slug=?",
-                    (json.dumps(sorted(old_links)), now, slug),
-                )
-                for to_slug in add_links:
+            if new_links is not None:
+                # body 改了: outgoing links 完全替换.
+                # 只在真的有差别时 (old → new 不同集) 才增 version + 更新 DB,
+                # 避免 no-op wikilink (e.g. body 改了但 wikilinks 没变) 多 bump 一次.
+                new_links_set = set(new_links)
+                if new_links_set != old_links:
+                    removed = old_links - new_links_set
+                    for to_slug in removed:
+                        conn.execute(
+                            "DELETE FROM links WHERE from_slug=? AND to_slug=?",
+                            (slug, to_slug),
+                        )
+                    for to_slug in new_links:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO links (from_slug, to_slug) VALUES (?, ?)",
+                            (slug, to_slug),
+                        )
                     conn.execute(
-                        "INSERT OR IGNORE INTO links (from_slug, to_slug) VALUES (?, ?)",
-                        (slug, to_slug),
+                        "UPDATE concepts SET links=?, version=version+1, updated_at=? WHERE slug=?",
+                        (json.dumps(new_links), now, slug),
                     )
 
             # 读最新 version (刚 UPDATE 多次, 拿 final)

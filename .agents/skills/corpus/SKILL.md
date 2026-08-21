@@ -69,8 +69,7 @@ error: <message>
 - `duplicate content already staged as ...` → 该 source_id 已存在，跳过
 - `duplicate content exists but is deleted: ...` → 同 hash 已 soft-deleted,加 `--force-revive` 复活
 - `concept slug already exists` → 用 `concepts update` 而非 `write`
-- `link cannot be self-reference` → concept 不能 wikilink 自己
-- `link not slug-safe` → links 必须是合法 slug (小写字母数字+连字符)
+(links 相关的错已下架: --links / --add-links CLI flag 不再存在; outgoing links 全从 body 的 [[wikilinks]] 自动派生. 自引用 / unsafe slug 在写入时被 _extract_wikilinks 安全过滤掉, 不抛错.)
 - `extraction not found` → `concepts remove-extraction` 的 id 不存在
 - `concept ... was modified concurrently` → multi-agent CAS 失败 (--expected-version 不匹配), hint 提示 read_concept 重新 read + merge
 - `concept slug already exists` (write_concept) → LLM 重新 find-by-link + read + merge + update_concept (--expected-version). 业务决策不在 storage 静默做.

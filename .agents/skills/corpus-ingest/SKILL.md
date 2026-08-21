@@ -41,6 +41,27 @@ description: >
 - 查 audit log / 看操作历史 → 主 `corpus` skill 的 `corpus audit`
 - 删除 concept / 清理 orphan → 主 `corpus` skill 的 `corpus delete` 等
 
+
+## 竞品参考 (body 结构参考)
+
+corpus 不强制 concept body 模板, 但 agent 抽 concept 时可以参考这几家公认模式
+择合适的写:
+
+| 体系 | 一概念一文件 | 链接形态 | body 结构 | 何时适用 |
+|---|---|---|---|---|
+| **Andy Matuschak evergreen notes** / **Zettelkasten** | yes | wikilink in body | 极强 prose, dense links, 一段到位 | 抽象概念 / 跨笔记互引 |
+| **Wikipedia lead** | yes | 内链 inline | lead 段定义 → 结构 → 字段说明 | 系统对象 / 文件 / 命令 |
+| **Cheatsheet card** | yes | inline 或独立 links | 三段 — 定义 / 命令 + 选项表 / 示例 | 命令 / API 参考 |
+| **Dendron schema** | yes + 强制 schema | frontmatter 主导 | 严格 YAML 模板 | corpus **不取这个** — frontmatter 只存元数据 |
+| **Foam / Obsidian** | yes | wikilink in body | 自由 | 默认参考 (corpus 设计最贴近) |
+
+观察:
+- 唯一共识 = wikilink 写在 body (frontmatter links 都是冗余, corpus 与 Obsidian 都不显示)
+- 模板差异 = 对 "原子" 的理解差异 (一概念 = 一个声明 / 一个系统对象 / 一组命令)
+- corpus 输出 markdown + 单源真 raw/ + 表格化 Concept 引出段, 这套与 Obsidian v
+  Vault 完全兼容 — 直接用 Obsidian 打开 wiki/ 就能看到 backlinks panel, 不需要额外桥接
+
+
 ## Pre-flight
 
 ```bash
@@ -160,7 +181,7 @@ elif result[0]["match_score"] >= 0.9:
 corpus concepts write <vault> \
   --slug postgresql-mvcc \
   --title "PostgreSQL MVCC" \
-  --body "## 定义\n..." \
+  --body "<按内容自选的 prose + wikilink>" \
   --extractions '[{"source_id":"abc123","quote_span":"..."}]' \
   --links wal,transaction-isolation \
   --prompt-version extract-v1 \

@@ -164,8 +164,7 @@ def test_batch_renames_and_counts_revived(vault: Path, external: Path):
     # 准备: 直接 stage 一个 source, 然后软删 (供 batch 复活)
     res = stage_source(
         db, raw_path=vault / "raw" / "ghost.md",
-        content="ghost content", original_filename="ghost.md",
-    )
+        content="ghost content", original_filename="ghost.md")
     ghost_sid = res["source_id"]
     soft_delete_source(db, ghost_sid)
 
@@ -199,8 +198,7 @@ def test_batch_without_revive_flags_deleted_as_failed(vault: Path, external: Pat
     db = vault / ".wiki-meta" / "corpus.db"
     res = stage_source(
         db, raw_path=vault / "raw" / "z.md",
-        content="z content", original_filename="z.md",
-    )
+        content="z content", original_filename="z.md")
     soft_delete_source(db, res["source_id"])
 
     src_dir = external
@@ -229,10 +227,10 @@ def test_concepts_list_orphans_filter(vault: Path, external: Path):
 
     write_concept(vault / ".wiki-meta" / "corpus.db",
         slug="with-src", title="With", body="b",
-        extractions_data=[{"source_id": sid, "quote_span": "alpha"}], links=[])
+        extractions_data=[{"source_id": sid, "quote_span": "alpha"}])
     write_concept(vault / ".wiki-meta" / "corpus.db",
         slug="orphan-1", title="Orphan1", body="b",
-        extractions_data=[{"source_id": sid, "quote_span": "alpha"}], links=[])
+        extractions_data=[{"source_id": sid, "quote_span": "alpha"}])
     # 让 orphan-1 变 orphan: remove_source
     _runner().invoke(cli, ["concepts", "remove-source", str(vault), "orphan-1", "--source-id", sid])
 
@@ -250,10 +248,10 @@ def test_concepts_list_certified_filters(vault: Path, external: Path):
     sid = json.loads(res.output)["source_id"]
     write_concept(vault / ".wiki-meta" / "corpus.db",
         slug="certed", title="C", body="b",
-        extractions_data=[{"source_id": sid, "quote_span": "a"}], links=[])
+        extractions_data=[{"source_id": sid, "quote_span": "a"}])
     write_concept(vault / ".wiki-meta" / "corpus.db",
         slug="raw", title="R", body="b",
-        extractions_data=[{"source_id": sid, "quote_span": "a"}], links=[])
+        extractions_data=[{"source_id": sid, "quote_span": "a"}])
     mark_certified(vault / ".wiki-meta" / "corpus.db", slug="certed", score=0.9, issues=[], suggestions=[])
 
     only_cert = json.loads(_runner().invoke(cli, ["concepts", "list", str(vault), "--certified", "--json"]).output)
@@ -291,12 +289,11 @@ def test_concepts_update_changes_body_and_adds_source(vault: Path, external: Pat
     ])
     assert res.exit_code == 0, res.output
 
-    # update: 改 body + 加 sid_b + 加 link
+    # update: 改 body (含 wikilink 表达 link) + 加 sid_b
     res = _runner().invoke(cli, [
         "concepts", "update", str(vault), "topic",
-        "--body", "new body after update",
+        "--body", "new body after update with [[related-topic]]",
         "--add-extractions", json.dumps([{"source_id": sid_b, "quote_span": "beta"}]),
-        "--add-links", "related-topic",
         "--json",
     ])
     assert res.exit_code == 0, res.output
@@ -308,10 +305,13 @@ def test_concepts_update_changes_body_and_adds_source(vault: Path, external: Pat
     wiki = (vault / "wiki" / "concept" / "topic.md").read_text(encoding="utf-8")
     assert "new body after update" in wiki
     assert "initial body" not in wiki
-
-    # DB body 也更新
+    # body 里的 [[related-topic]] 自动 derive 出 outgoing links (DB 侧)
     info = read_concept(vault / ".wiki-meta" / "corpus.db", "topic")
-    assert info["body"] == "new body after update"
+    assert "related-topic" in info["links"]
+
+    # DB body 也更新 (含 [[related-topic]] wikilink 用于派生 outgoing links)
+    info = read_concept(vault / ".wiki-meta" / "corpus.db", "topic")
+    assert info["body"] == "new body after update with [[related-topic]]"
 
 
 def test_concepts_update_rejects_self_link(vault: Path, external: Path):
@@ -324,16 +324,22 @@ def test_concepts_update_rejects_self_link(vault: Path, external: Path):
 
     _runner().invoke(cli, [
         "concepts", "write", str(vault),
-        "--slug", "self", "--title", "S", "--body", "b",
+        "--slug", "self", "--title", "S",
+        "--body", "self-ref body without wikilinks",
         "--extractions", json.dumps([{"source_id": sid, "quote_span": "x"}]),
         "--json",
     ])
+    # --add-links 已 drop. outgoing links 现在从 body wikilink 派生.
+    # 写 body 含 self-ref [[self]] 应该被存储层自动过滤 (exclude_slug=slug).
     res = _runner().invoke(cli, [
         "concepts", "update", str(vault), "self",
-        "--add-links", "self", "--json",
+        "--body", "this body has [[self]] self-ref should be filtered", "--json",
     ])
-    assert res.exit_code == 1
-    assert "self-reference" in (res.stderr or "").lower()
+    assert res.exit_code == 0
+    # 概念读出来 outgoing links 应为空
+    from corpus.storage import read_concept
+    info = read_concept(Path(vault) / ".wiki-meta" / "corpus.db", "self")
+    assert info["links"] == [], f"self-ref wikilink 应该被过滤, 实际: {info['links']}"
 
 
 # ---------- concepts delete CLI ----------
@@ -522,11 +528,11 @@ def test_find_by_link_returns_match_score_sorted(vault: Path, external: Path):
     sid = json.loads(res.output)["source_id"]
     db = vault / ".wiki-meta" / "corpus.db"
     write_concept(db, slug="postgres", title="Postgres Overview", body="b",
-        extractions_data=[{"source_id": sid, "quote_span": "x"}], links=[])
+        extractions_data=[{"source_id": sid, "quote_span": "x"}])
     write_concept(db, slug="postgres-mvcc", title="MVCC", body="b",
-        extractions_data=[{"source_id": sid, "quote_span": "x"}], links=[])
+        extractions_data=[{"source_id": sid, "quote_span": "x"}])
     write_concept(db, slug="wal-deep", title="Deep dive into PostgreSQL WAL", body="b",
-        extractions_data=[{"source_id": sid, "quote_span": "x"}], links=[])
+        extractions_data=[{"source_id": sid, "quote_span": "x"}])
 
     # 搜 "postgres" → 第一个是 exact, 然后 startswith, contains, title
     res = _runner().invoke(cli, ["concepts", "find-by-link", str(vault), "postgres", "--json"])
